@@ -1,8 +1,6 @@
 import numpy as np
-import pandas as pd
 from typing import Literal, List, Optional, Dict, Any
 import torch
-import os
 from sklearn.metrics import average_precision_score
 from peft import PeftModel
 from tqdm import tqdm
