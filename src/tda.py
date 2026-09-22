@@ -1,158 +1,269 @@
-import numpy as np
-from typing import Literal, List, Optional, Dict, Any
-import pandas as pd 
 import torch
-from sklearn.metrics import average_precision_score
+import torch.nn.functional as F
+import numpy as np
+from datasets import Dataset
+from transformers import AutoTokenizer, AutoModelForCausalLM, TokenizersBackend
+from typing import Dict, List, Optional, Literal
+from transformers import TokenizersBackend
 from peft import PeftModel
-from tqdm import tqdm
-from dataclasses import dataclass
+from numpy.typing import NDArray
 
-from . import instance_RepT, TracInLN
-
-
-@dataclass
-class Result:
-    top_k: int
-    auPRC: float
-    P_at_k: float
-    R_at_k: float
-    MRR: float
-    method: str 
-
-    def __repr__(self):
-        return (
-            f"Result(top_k={self.top_k}, "
-            f"method='{self.method}', "
-            f"auPRC={self.auPRC:.4f}, "
-            f"P@k={self.P_at_k:.4f}, "
-            f"R@k={self.R_at_k:.4f}, "
-            f"MRR={self.MRR:.4f})"
-        )
+from . import Params
 
 
 class TDA:
     def __init__(
         self,
-        model,
-        tokenizer,
-        device: Literal["cuda", "cpu"],
+        model: PeftModel,
+        tokenizer: TokenizersBackend,
+        params: Params,
+        device=Literal["cpu", "cuda"],
+        display: bool = False,
     ):
-        self.model: PeftModel = model
-        self.device = torch.device(device)
+        self.model = model
+        self.params = params
         self.tokenizer = tokenizer
-        self.model.to(self.device)
+        self.device = torch.device(device)
+        self.display = display
 
-    def _sim(self):
+    def trace(
+        self,
+        method: Literal["rept", "tracein", "rapid_in", "less", "lorif"],
+        prompt: str,
+        expected_response: str,
+    ) -> NDArray:
+        if method == "rept":
+            return self.rept(prompt, expected_response, layer=self.params.layer)
+        elif method == "tracein":
+            return self.trace_in(
+                prompt, expected_response, layer_norm=self.params.layer_norm
+            )
+        elif method == "lorif":
+            raise NotImplementedError
+        elif method == "less":
+            raise NotImplementedError
+        elif method == "rapid_in":
+            raise NotImplementedError
+        else:
+            raise NotImplementedError
+
+    def rapid_in(self):
+        pass
+
+    def less(self):
+        pass
+
+    def get_gradient_vector(self, prompt, expected_response) -> torch.Tensor:
+        self.model.train()
+        self.model.zero_grad()
+        inputs = self.get_tokenized_text(
+            self.tokenizer,
+            {"prompts": prompt, "response": expected_response},
+            device=self.device,
+        )
+        outputs = self.model.forward(**inputs)
+        loss: torch.Tensor = outputs["loss"]
+        loss.backward()
+        gv = torch.cat(
+            [
+                p.grad.view(-1)
+                for n, p in self.model.named_parameters()
+                if p.grad is not None
+            ]
+        )
+        return gv.detach()
+
+    def trace_in(self, prompt: str, expected_response: str, layer_norm: bool = True):
+        gv = self.get_gradient_vector(prompt, expected_response)
+        if layer_norm:
+            gv = F.layer_norm(gv, normalized_shape=[gv.shape[-1]])
+        gv = gv.view(-1).to(torch.float32)
+        return gv.cpu().numpy()
+
+    def get_representation(
+        self,
+        prompt,
+        layer,
+        device,
+    ) -> NDArray:
+        self.model.eval()
+        if not (1 <= layer <= self.model.config.num_hidden_layers or layer == -1):
+            raise ValueError(
+                f"Layer index must be between 1 and {self.model.config.num_hidden_layers}. Got {layer}."
+            )
+        if self.tokenizer.chat_template:
+            prompt = self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        else:
+            prompt = "[INST] " + prompt + " [/INST]"
+        inputs = self.tokenizer(prompt, padding=True, return_tensors="pt").to(device)
+        with torch.no_grad():
+            outputs = self.model(**inputs, output_hidden_states=True)
+        hidden: torch.Tensor = outputs["hidden_states"][layer][:, -1, :].to(
+            torch.float32
+        )
+        return hidden.view(-1).cpu().numpy()
+
+    def get_representation_gradient(
+        self,
+        prompt,
+        expected_response,
+        layer,
+        device,
+    ) -> NDArray:
+        self.model.train()
+        self.model.zero_grad()
+        self.model.config.use_cache = False
+        # model.set_requires_grad(requires_grad=True)
+        captured_grads = []
+        if not (1 <= layer <= self.model.config.num_hidden_layers or layer == -1):
+            raise ValueError(
+                f"Layer index must be between 1 and {self.model.config.num_hidden_layers}. Got {layer}."
+            )
+        inputs = self.get_tokenized_text(
+            self.tokenizer,
+            {"prompts": prompt, "response": expected_response},
+            device=device,
+        )
+        outputs = self.model(**inputs, output_hidden_states=True, use_cache=False)
+        prompt_len = (inputs["labels"].cpu().numpy() == -100).sum()
+        last_hidden_state: torch.Tensor = outputs["hidden_states"][layer]
+        last_hidden_state.register_hook(lambda grad: captured_grads.append(grad))
+        loss = outputs["loss"]
+        loss.backward()
+        self.model.zero_grad(set_to_none=True)
+        torch.cuda.empty_cache()
+        # [0, 0, ..., 0, 0, r_response_1, ..., r_response_n, 0]
+        cg: torch.Tensor = captured_grads[0][0][prompt_len - 1 : -1].to(torch.float32)
+        return cg.view(-1).cpu().numpy()
+
+    def rept(
+        self,
+        prompt: str,
+        response: str,
+        layer: int,
+    ):
+        H = self.get_representation(prompt, layer)
+        g_H = self.get_representation_gradient(prompt, response, layer)[0]
+        return np.hstack((H, g_H))
+
+    def tokenize(self, tokenizer: TokenizersBackend, sample: Dict, max_length=512):
+        if tokenizer.chat_template:
+            message = [
+                {"role": "user", "content": sample["prompts"]},
+                {"role": "assistant", "content": sample["response"]},
+            ]
+            full_text = tokenizer.apply_chat_template(message, tokenize=False)
+            full_tokenized = tokenizer(
+                full_text, truncation=True, max_length=512, padding=False
+            )
+            prompt_only_text = tokenizer.apply_chat_template(
+                [message[0]], tokenize=False, add_generation_prompt=True
+            )
+            prompt_length = len(
+                tokenizer(
+                    prompt_only_text,
+                    truncation=True,
+                    max_length=max_length,
+                    padding=False,
+                )["input_ids"]
+            )
+        else:
+            full_text = (
+                "[INST] "
+                + sample["prompts"]
+                + " [/INST]"
+                + sample["response"]
+                + tokenizer.eos_token
+            )
+            full_tokenized = tokenizer(
+                full_text, truncation=True, max_length=512, padding=False
+            )
+            prompt_length = len(
+                tokenizer(
+                    "[INST] " + sample["prompts"] + " [/INST]",
+                    truncation=True,
+                    max_length=max_length,
+                    padding=False,
+                )["input_ids"]
+            )
+
+        input_ids = full_tokenized["input_ids"]
+        labels = list(input_ids)
+        labels[:prompt_length] = [-100] * prompt_length
         return {
-            "dot": lambda a, b: np.dot(a, b),
-            "cosine": lambda a, b: np.dot(a, b)
-            / (np.linalg.norm(a) * np.linalg.norm(b)),
+            "input_ids": input_ids,
+            "labels": labels,
+            "attention_mask": full_tokenized["attention_mask"],
         }
 
-    def compute_attribution(
+    def get_tokenized_dataset(
         self,
-        source_data,
-        eval_data,
-        source_vector,
-        eval_vector,
-        topk,
-        metric,
-        method,
+        tokenizer: TokenizersBackend,
+        dataset: Dataset,
+        max_length=512,
     ):
-        topk = sorted(topk, reverse=True)
-        y_scores, y_trues, precision, recall, rrs = (
-            {k: [] for k in topk},
-            {k: [] for k in topk},
-            {k: [] for k in topk},
-            {k: [] for k in topk},
-            {k: [] for k in topk},
+        return dataset.map(
+            self.tokenize,
+            fn_kwargs={
+                "tokenizer": tokenizer,
+                "max_length": max_length,
+            },
+            remove_columns=list(dataset.features),
         )
-        for i, vector in enumerate(eval_vector):
-            sim_score = np.array(
-                [self._sim()[metric](vector, vector_s) for vector_s in source_vector]
-            )
-            y_trues_map = np.array(
-                [int(eval_data["label"][i] == label) for label in source_data["label"]]
-            )
-            top_max_k_indices = np.argsort(sim_score)[-topk[0] :]
-            sorted_idx = np.argsort(sim_score)[::-1]
-            for k in topk:
-                top_k_indices = top_max_k_indices[-k:]
-                precision[k].append(y_trues_map[top_k_indices].sum() / k)
-                correct_total = y_trues_map.sum()
-                recall[k].append(
-                    y_trues_map[top_k_indices].sum() / correct_total
-                    if correct_total > 0
-                    else 0
-                )
-                rr = 0
-                for rank, idx in enumerate(sorted_idx):
-                    if y_trues_map[idx] == 1:
-                        rr = 1.0 / (rank + 1)
-                        break
-                rrs[k].append(rr)
-                for j in top_k_indices:
-                    y_scores[k].append(sim_score[j])
-                    y_trues[k].append(y_trues_map[j])
-        results = [
-            Result(
-                top_k=k,
-                auPRC=average_precision_score(y_trues[k], y_scores[k]),
-                P_at_k=np.mean(precision[k]),
-                R_at_k=np.mean(recall[k]),
-                MRR=np.mean(rrs[k]),
-                method=method,
-            )
-            for k in topk
-        ]
-        return results
 
-    def tracing(
-        self,
-        source_dataset: pd.DataFrame,
-        eval_dataset: pd.DataFrame,
-        method: Literal["RepT", "TracInLN"],
-        topk: List[int],
-        layer: int = -1,
+    def get_tokenized_text(
+        self, tokenizer: TokenizersBackend, sample, device, max_length=512
     ):
-        sources, evls = [], []
-        metric = "dot" if method == "TracInLN" else "cosine"
-        for idx in tqdm(range(len(source_dataset["prompts"]))):
-            prompt = source_dataset["prompts"].iloc[idx]
-            response = source_dataset["response"].iloc[idx]
-            if method == "RepT":
-                gv_source = instance_RepT(
-                    self.model,
-                    self.tokenizer,
-                    prompt,
-                    response,
-                    layer,
-                    self.device,
-                )
-            elif method == "TracInLN":
-                gv_source = TracInLN(
-                    self.model,
-                    self.tokenizer,
-                    prompt,
-                    response,
-                )
-            sources.append(gv_source)
-        for idx in tqdm(range(len(eval_dataset["prompts"]))):
-            prompt = eval_dataset["prompts"].iloc[idx]
-            expected_response = eval_dataset["expected_response"].iloc[idx]
-            if method == "RepT":
-                evl = instance_RepT(
-                    self.model,
-                    self.tokenizer,
-                    prompt,
-                    expected_response,
-                    layer,
-                    self.device,
-                )
-            elif method == "TracInLN":
-                evl = TracInLN(self.model, self.tokenizer, prompt, expected_response)
-            evls.append(evl)
-        results = self.compute_attribution(
-            source_dataset, eval_dataset, sources, evls, topk, metric, method
-        )
-        return results
+        if tokenizer.chat_template:
+            message = [
+                {"role": "user", "content": sample["prompts"]},
+                {"role": "assistant", "content": sample["response"]},
+            ]
+            full_text = tokenizer.apply_chat_template(message, tokenize=False)
+            full_tokenized = tokenizer(
+                full_text, truncation=True, max_length=max_length, padding=False
+            )
+            prompt_only_text = tokenizer.apply_chat_template(
+                [message[0]], tokenize=False, add_generation_prompt=True
+            )
+            prompt_length = len(
+                tokenizer(
+                    prompt_only_text,
+                    truncation=True,
+                    max_length=max_length,
+                    padding=False,
+                )["input_ids"]
+            )
+        else:
+            full_text = (
+                "[INST] "
+                + sample["prompts"]
+                + " [/INST]"
+                + sample["response"]
+                + tokenizer.eos_token
+            )
+            full_tokenized = tokenizer(
+                full_text, truncation=True, max_length=max_length, padding=False
+            )
+            prompt_length = len(
+                tokenizer(
+                    "[INST] " + sample["prompts"] + " [/INST]",
+                    truncation=True,
+                    max_length=max_length,
+                    padding=False,
+                )["input_ids"]
+            )
+        input_ids = full_tokenized["input_ids"]
+        labels = list(input_ids)
+        labels[:prompt_length] = [-100] * prompt_length
+        return {
+            "input_ids": torch.tensor([input_ids]).to(device),
+            "labels": torch.tensor([labels]).to(device),
+            "attention_mask": torch.tensor([full_tokenized["attention_mask"]]).to(
+                device
+            ),
+        }
