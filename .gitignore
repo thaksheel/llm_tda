@@ -14,6 +14,9 @@ Thumbs.db
 # Ignore folders
 data/
 exports/
+out/ 
+datasets/
+lora_adapter/
 temp/
 
 .env

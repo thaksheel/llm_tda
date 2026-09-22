@@ -1,5 +1,6 @@
 import numpy as np
 from typing import Literal, List, Optional, Dict, Any
+import pandas as pd 
 import torch
 from sklearn.metrics import average_precision_score
 from peft import PeftModel
@@ -108,8 +109,8 @@ class TDA:
 
     def tracing(
         self,
-        source_dataset,
-        eval_dataset,
+        source_dataset: pd.DataFrame,
+        eval_dataset: pd.DataFrame,
         method: Literal["RepT", "TracInLN"],
         topk: List[int],
         layer: int = -1,
@@ -120,7 +121,7 @@ class TDA:
             prompt = source_dataset["prompts"].iloc[idx]
             response = source_dataset["response"].iloc[idx]
             if method == "RepT":
-                source = instance_RepT(
+                gv_source = instance_RepT(
                     self.model,
                     self.tokenizer,
                     prompt,
@@ -129,13 +130,13 @@ class TDA:
                     self.device,
                 )
             elif method == "TracInLN":
-                source = TracInLN(
+                gv_source = TracInLN(
                     self.model,
                     self.tokenizer,
                     prompt,
                     response,
                 )
-            sources.append(source)
+            sources.append(gv_source)
         for idx in tqdm(range(len(eval_dataset["prompts"]))):
             prompt = eval_dataset["prompts"].iloc[idx]
             expected_response = eval_dataset["expected_response"].iloc[idx]

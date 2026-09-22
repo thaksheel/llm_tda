@@ -93,7 +93,6 @@ def get_tokenized_text(tokenizer: TokenizersBackend, sample, device, max_length=
                 padding=False,
             )["input_ids"]
         )
-
     input_ids = full_tokenized["input_ids"]
     labels = list(input_ids)
     labels[:prompt_length] = [-100] * prompt_length
