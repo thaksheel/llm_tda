@@ -29,8 +29,8 @@ evl_dataset = pd.read_csv("./data/datasets/harmful-tuning_test.csv")
 
 tda = TDA(model=model, tokenizer=tokenizer, device="cuda")
 results_tracein = tda.tracing(
-    source_dataset=df_source.sample(n=10),
-    eval_dataset=evl_dataset.sample(n=5),
+    source_dataset=df_source.sample(n=100),
+    eval_dataset=evl_dataset.sample(n=50),
     method="TracInLN",
     topk=[1, 5, 10, 30, 50, 100, 250, 500, 1000],
     layer=-1,
@@ -38,14 +38,14 @@ results_tracein = tda.tracing(
 df_results = pd.DataFrame([r.__dict__ for r in results_tracein])
 df_results.to_excel("./exports/tda_results4.xlsx")
 
-results_tracein = tda.tracing(
+results_rept = tda.tracing(
     source_dataset=df_source,
     eval_dataset=evl_dataset,
     method="RepT",
     topk=[1, 5, 10, 30, 50, 100, 250, 500, 1000],
     layer=-1,
 )
-df_ = pd.DataFrame([r.__dict__ for r in results_tracein])
+df_ = pd.DataFrame([r.__dict__ for r in results_rept])
 df_results = pd.concat([df_results, df_]) 
 df_results['llm_model'] = [model_name] * len(df_results)
 df_results.to_excel("./exports/tda_results4.xlsx")
