@@ -1,6 +1,6 @@
 # from methods import 
 
-from .utils import Result, Params
+from .utils import Result, Params, get_tokenized_dataset
 from .finetune import Tuner
 from .tda import TDA
 from .tda_evaluation import TDAEvaluation

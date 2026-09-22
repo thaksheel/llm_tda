@@ -34,8 +34,8 @@ tda = TDAEvaluation(
     params=Params(layer=-1, layer_norm=True),
 )
 results = tda.tracing(
-    source_dataset=df_source.sample(n=100),
-    eval_dataset=evl_dataset.sample(n=50),
+    source_dataset=df_source,
+    eval_dataset=evl_dataset,
     method="rept",
     topk=[1, 5, 10, 30, 50, 100, 250, 500, 1000],
 )

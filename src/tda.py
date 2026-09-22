@@ -1,9 +1,9 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
+from typing import Dict, List, Optional, Literal
 from datasets import Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM, TokenizersBackend
-from typing import Dict, List, Optional, Literal
 from transformers import TokenizersBackend
 from peft import PeftModel
 from numpy.typing import NDArray
@@ -84,7 +84,6 @@ class TDA:
         self,
         prompt,
         layer,
-        device,
     ) -> NDArray:
         self.model.eval()
         if not (1 <= layer <= self.model.config.num_hidden_layers or layer == -1):
@@ -99,7 +98,7 @@ class TDA:
             )
         else:
             prompt = "[INST] " + prompt + " [/INST]"
-        inputs = self.tokenizer(prompt, padding=True, return_tensors="pt").to(device)
+        inputs = self.tokenizer(prompt, padding=True, return_tensors="pt").to(self.device)
         with torch.no_grad():
             outputs = self.model(**inputs, output_hidden_states=True)
         hidden: torch.Tensor = outputs["hidden_states"][layer][:, -1, :].to(
@@ -112,7 +111,6 @@ class TDA:
         prompt,
         expected_response,
         layer,
-        device,
     ) -> NDArray:
         self.model.train()
         self.model.zero_grad()
@@ -126,7 +124,7 @@ class TDA:
         inputs = self.get_tokenized_text(
             self.tokenizer,
             {"prompts": prompt, "response": expected_response},
-            device=device,
+            device=self.device,
         )
         outputs = self.model(**inputs, output_hidden_states=True, use_cache=False)
         prompt_len = (inputs["labels"].cpu().numpy() == -100).sum()

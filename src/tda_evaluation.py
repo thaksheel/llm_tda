@@ -26,6 +26,7 @@ class TDAEvaluation:
         self.tda = TDA(
             self.model,
             tokenizer,
+            params,
             self.device,
             display,
         )
@@ -60,7 +61,10 @@ class TDAEvaluation:
                 [self._sim()[metric](vector, vector_s) for vector_s in source_vector]
             )
             y_trues_map = np.array(
-                [int(eval_data["label"][i] == label) for label in source_data["label"]]
+                [
+                    int(eval_data["label"].tolist()[i] == label)
+                    for label in source_data["label"]
+                ]
             )
             top_max_k_indices = np.argsort(sim_score)[-topk[0] :]
             sorted_idx = np.argsort(sim_score)[::-1]
@@ -104,19 +108,19 @@ class TDAEvaluation:
     ):
         source_signals, testing_signals = [], []
         metric = "dot" if method == "TracInLN" else "cosine"
-        for row in tqdm(source_dataset):
+        for i, row in tqdm(source_dataset.iterrows(), total=source_dataset.shape[0]):
             source_signals.append(
                 self.tda.trace(
                     method=method,
-                    prompt=row["prompt"],
+                    prompt=row["prompts"],
                     expected_response=row["response"],
                 )
             )
-        for row in tqdm(eval_dataset):
+        for i, row in tqdm(eval_dataset.iterrows(), total=eval_dataset.shape[0]):
             testing_signals.append(
                 self.tda.trace(
                     method=method,
-                    prompt=row["prompt"],
+                    prompt=row["prompts"],
                     expected_response=row["expected_response"],
                 )
             )

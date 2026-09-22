@@ -14,7 +14,7 @@ from transformers import (
 )
 from peft import PeftModel
 
-from .utils import get_tokenized_dataset
+from . import get_tokenized_dataset
 
 
 class Tuner:
@@ -104,7 +104,3 @@ class Tuner:
             )
         return trainer
 
-    def evaluate(
-        self,
-    ):
-        pass
