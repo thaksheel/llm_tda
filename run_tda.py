@@ -12,10 +12,9 @@ model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForCausalLM.from_pretrained(model_name)
-model = PeftModel.from_pretrained(
-    model,
-    "./lora_adapter/TinyLlama/TinyLlama-1.1B-Chat-v1.0/datasets/harmful-tuning",
-)
+lora_path = "./lora_adapter/TinyLlama/TinyLlama-1.1B-Chat-v1.0/datasets/harmful-tuning"
+model = PeftModel.from_pretrained(model, lora_path)
+optimizer_state = torch.load(lora_path + "/optimizer.pt", map_location="cpu")["state"]
 # Unfreeze base model parameters for RepT
 for p in model.base_model.parameters():
     p.requires_grad = True
@@ -31,7 +30,7 @@ tda = TDAEvaluation(
     model=model,
     tokenizer=tokenizer,
     device="cuda",
-    params=Params(layer=-1, layer_norm=True),
+    params=Params(layer=-1, layer_norm=True, optimizer_state=optimizer_state),
 )
 results = tda.tracing(
     source_dataset=df_source,

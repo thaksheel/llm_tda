@@ -1,4 +1,5 @@
 # from methods import 
+from modules import BasicProjector, ProjectionType
 
 from .utils import Result, Params, get_tokenized_dataset
 from .finetune import Tuner

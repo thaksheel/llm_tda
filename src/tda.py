@@ -1,14 +1,15 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
+import random
 from typing import Dict, List, Optional, Literal
 from datasets import Dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM, TokenizersBackend
+from transformers import TokenizersBackend
 from transformers import TokenizersBackend
 from peft import PeftModel
 from numpy.typing import NDArray
 
-from . import Params
+from . import Params, BasicProjector, ProjectionType
 
 
 class TDA:
@@ -41,17 +42,115 @@ class TDA:
         elif method == "lorif":
             raise NotImplementedError
         elif method == "less":
-            raise NotImplementedError
+            return self.less(
+                prompt, expected_response, optimizer_state=self.params.optimizer_state
+            )
         elif method == "rapid_in":
-            raise NotImplementedError
+            return self.rapid_in(prompt, expected_response)
         else:
             raise NotImplementedError
 
-    def rapid_in(self):
-        pass
+    def _get_divisors(self, n):
+        divs = []
+        for i in range(1, int(n**0.5) + 1):
+            if n % i == 0:
+                divs.append(i)
+        return divs
 
-    def less(self):
-        pass
+    def random_suffle(self, vector: torch.Tensor, num_shuffles=20):
+        vec_len = vector.shape[0] * vector.shape[1]
+        shuffled_v = vector.clone()
+        divs = self._get_divisors(vec_len)
+        # random shuffle
+        for _ in range(num_shuffles):
+            x_row = random.choice(divs)
+            mat = shuffled_v.reshape(x_row, vec_len // x_row)
+            row_indices = torch.randperm(mat.shape[0], device=vector.device)
+            shuffled_v = mat[row_indices, :]
+            x_col = random.choice(divs)
+            mat = shuffled_v.reshape(vec_len // x_col, x_col)
+            col_indices = torch.randperm(mat.shape[1], device=vector.device)
+            shuffled_v = mat[:, col_indices]
+        return shuffled_v.flatten()
+
+    def rapid_in(self, prompt: str, expected_response: str):
+        self.model.eval()
+        self.model.zero_grad()
+        inputs = self.get_tokenized_text(
+            self.tokenizer,
+            {"prompts": prompt, "response": expected_response},
+            device=self.model.device,
+        )
+        outputs = self.model(**inputs)
+        loss: torch.Tensor = outputs["loss"]
+        loss.backward()
+        gradient_vector = torch.cat(
+            [
+                p.grad.view(-1)
+                for n, p in self.model.named_parameters()
+                if p.grad is not None
+            ]
+        )
+        gradient_vector = gradient_vector.reshape(
+            self.model.config.num_hidden_layers, -1
+        )
+        gradient_vector = F.layer_norm(
+            gradient_vector, normalized_shape=[gradient_vector.shape[-1]]
+        )
+        gradient_vector = self.random_suffle(gradient_vector)
+        gradient_vector = self.random_projection(
+            gradient_vector, proj_dim=2**16, block_size=1024
+        )
+        return gradient_vector.cpu().numpy()
+
+    def prepare_optimizer_state(self, optimizer_state):
+        names = [_ for _ in range(len(optimizer_state))]
+        avg = torch.cat([optimizer_state[n]["exp_avg"].view(-1) for n in names])
+        avg_sq = torch.cat([optimizer_state[n]["exp_avg_sq"].view(-1) for n in names])
+        avg = avg.to(self.device)
+        avg_sq = avg_sq.to(self.device)
+        return avg, avg_sq
+
+    def random_projection(
+        self, vector: torch.Tensor, proj_dim=8192, block_size=128, model_id=0
+    ):
+        projector = BasicProjector(
+            grad_dim=vector.shape[0],
+            proj_dim=proj_dim,
+            seed=42,
+            proj_type=ProjectionType.rademacher,
+            device=vector.device,
+            block_size=block_size,
+        )
+        projected_v = projector.project(vector.reshape(1, -1), model_id=model_id)
+        return projected_v.view(-1)
+
+    def less(self, prompt, expected_response, optimizer_state=None):
+        self.model.eval()
+        self.model.zero_grad()
+        inputs = self.get_tokenized_text(
+            self.tokenizer,
+            {"prompts": prompt, "response": expected_response},
+            device=self.device,
+        )
+        outputs = self.model(**inputs)
+        loss: torch.Tensor = outputs["loss"]
+        loss.backward()
+        beta1, beta2, eps = 0.9, 0.999, 1e-08
+        gradient_vector = torch.cat(
+            [
+                p.grad.view(-1)
+                for n, p in self.model.named_parameters()
+                if p.grad is not None
+            ]
+        )
+        if optimizer_state is not None:
+            avg, avg_sq = self.prepare_optimizer_state(optimizer_state)
+            updated_avg = beta1 * avg + (1 - beta1) * gradient_vector
+            updated_avg_sq = beta2 * avg_sq + (1 - beta2) * gradient_vector**2
+            gradient_vector = updated_avg / torch.sqrt(updated_avg_sq + eps)
+        gradient_vector = self.random_projection(gradient_vector)
+        return gradient_vector.cpu().numpy()
 
     def get_gradient_vector(self, prompt, expected_response) -> torch.Tensor:
         self.model.train()
@@ -98,7 +197,9 @@ class TDA:
             )
         else:
             prompt = "[INST] " + prompt + " [/INST]"
-        inputs = self.tokenizer(prompt, padding=True, return_tensors="pt").to(self.device)
+        inputs = self.tokenizer(prompt, padding=True, return_tensors="pt").to(
+            self.device
+        )
         with torch.no_grad():
             outputs = self.model(**inputs, output_hidden_states=True)
         hidden: torch.Tensor = outputs["hidden_states"][layer][:, -1, :].to(

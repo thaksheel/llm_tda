@@ -12,7 +12,6 @@ from torch import nn
 
 from .factors import Factors, factorize
 
-
 ProjectionNormalization = Literal["legacy", "jl", "none"]
 
 
@@ -71,14 +70,19 @@ def rademacher_projection(
         target_device = torch.device(device)
         generator = torch.Generator(device=target_device)
         generator.manual_seed(int(seed) & 0x7FFFFFFF)
-        signs = torch.randint(
-            0,
-            2,
-            (target_dim, source_dim),
-            generator=generator,
-            dtype=torch.int8,
-            device=target_device,
-        ).transpose(0, 1).contiguous().to(torch.float32)
+        signs = (
+            torch.randint(
+                0,
+                2,
+                (target_dim, source_dim),
+                generator=generator,
+                dtype=torch.int8,
+                device=target_device,
+            )
+            .transpose(0, 1)
+            .contiguous()
+            .to(torch.float32)
+        )
     else:
         generator = torch.Generator(device="cpu")
         generator.manual_seed(int(seed) & 0x7FFFFFFF)
@@ -256,9 +260,7 @@ class GradientCollector:
         for name in self.module_names:
             digest.update(name.encode())
             digest.update(b"\0")
-            for label, tensor in zip(
-                (b"input", b"output"), self._projections[name]
-            ):
+            for label, tensor in zip((b"input", b"output"), self._projections[name]):
                 value = tensor.detach().cpu().contiguous()
                 digest.update(label)
                 digest.update(b"\0")
@@ -331,8 +333,7 @@ class GradientCollector:
                     matrix = self._projected_gradients.pop(name)
                     generator = torch.Generator(device=matrix.device)
                     generator.manual_seed(
-                        self.projection_seed
-                        ^ stable_hash32(f"{name}:factorization")
+                        self.projection_seed ^ stable_hash32(f"{name}:factorization")
                     )
                     factors = factorize(
                         matrix,

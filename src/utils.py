@@ -30,6 +30,7 @@ class Params:
     """Parameters for TDA in TDAEvaluation for each of use across self.traces evaluations for all methods."""
     layer_norm: bool = True
     layer: int = -1
+    optimizer_state = None # load optimizer.pt then query for ['state']
 
 def tokenize(tokenizer: TokenizersBackend, sample: Dict, max_length=512):
     if tokenizer.chat_template:
