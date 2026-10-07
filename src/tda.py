@@ -39,14 +39,14 @@ class TDA:
             return self.trace_in(
                 prompt, expected_response, layer_norm=self.params.layer_norm
             )
-        elif method == "lorif":
-            raise NotImplementedError
         elif method == "less":
             return self.less(
                 prompt, expected_response, optimizer_state=self.params.optimizer_state
             )
         elif method == "rapid_in":
             return self.rapid_in(prompt, expected_response)
+        elif method == "lorif":
+            raise NotImplementedError
         else:
             raise NotImplementedError
 
@@ -58,7 +58,7 @@ class TDA:
         return divs
 
     def random_suffle(self, vector: torch.Tensor, num_shuffles=20):
-        vec_len = vector.shape[0] * vector.shape[1]
+        vec_len = vector.shape[0]
         shuffled_v = vector.clone()
         divs = self._get_divisors(vec_len)
         # random shuffle
@@ -91,9 +91,9 @@ class TDA:
                 if p.grad is not None
             ]
         )
-        gradient_vector = gradient_vector.reshape(
-            self.model.config.num_hidden_layers, -1
-        )
+        # gradient_vector = gradient_vector.reshape(
+        #     self.model.config.num_hidden_layers
+        # )
         gradient_vector = F.layer_norm(
             gradient_vector, normalized_shape=[gradient_vector.shape[-1]]
         )
@@ -213,7 +213,7 @@ class TDA:
         expected_response,
         layer,
     ) -> NDArray:
-        self.model.train()
+        self.model.train() 
         self.model.zero_grad()
         self.model.config.use_cache = False
         # model.set_requires_grad(requires_grad=True)

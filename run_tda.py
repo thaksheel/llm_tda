@@ -35,7 +35,7 @@ tda = TDAEvaluation(
 results = tda.tracing(
     source_dataset=df_source,
     eval_dataset=evl_dataset,
-    method="rept",
+    method="less",
     topk=[1, 5, 10, 30, 50, 100, 250, 500, 1000],
 )
 df_results = pd.DataFrame([r.__dict__ for r in results])

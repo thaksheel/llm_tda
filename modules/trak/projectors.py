@@ -19,9 +19,6 @@ import torch
 from .utils import vectorize
 
 
-ch = torch
-
-
 class ProjectionType(str, Enum):
     normal: str = "normal"
     rademacher: str = "rademacher"
@@ -144,7 +141,7 @@ class BasicSingleBlockProjector(AbstractProjector):
         seed: int,
         proj_type: ProjectionType,
         device,
-        dtype=ch.float32,
+        dtype=torch.float32,
         model_id=0,
         *args,
         **kwargs,
@@ -153,13 +150,13 @@ class BasicSingleBlockProjector(AbstractProjector):
 
         self.model_id = model_id
         self.proj_type = proj_type
-        self.generator = ch.Generator(device=self.device)
+        self.generator = torch.Generator(device=self.device)
         self.generator = self.generator.manual_seed(
             self.seed + int(1e4) * self.model_id
         )
         self.dtype = dtype
 
-        self.proj_matrix = ch.empty(
+        self.proj_matrix = torch.empty(
             self.grad_dim, self.proj_dim, dtype=self.dtype, device=self.device
         )
 
@@ -173,7 +170,7 @@ class BasicSingleBlockProjector(AbstractProjector):
 
     def generate_sketch_matrix(self):
         if not self.proj_matrix_available:
-            self.proj_matrix = ch.empty(
+            self.proj_matrix = torch.empty(
                 self.grad_dim, self.proj_dim, dtype=self.dtype, device=self.device
             )
             self.proj_matrix_available = True
@@ -227,7 +224,7 @@ class BasicProjector(AbstractProjector):
         proj_type: ProjectionType,
         device: torch.device,
         block_size: int = 100,
-        dtype: torch.dtype = ch.float32,
+        dtype: torch.dtype = torch.float32,
         model_id=0,
         *args,
         **kwargs,
@@ -240,13 +237,13 @@ class BasicProjector(AbstractProjector):
         self.proj_type = proj_type
         self.model_id = model_id
 
-        self.proj_matrix = ch.empty(
+        self.proj_matrix = torch.empty(
             self.grad_dim, self.block_size, dtype=self.dtype, device=self.device
         )
 
         self.proj_matrix_available = True
 
-        self.generator = ch.Generator(device=self.device)
+        self.generator = torch.Generator(device=self.device)
 
         self.get_generator_states()
         self.generate_sketch_matrix(self.generator_states[0])
@@ -268,7 +265,7 @@ class BasicProjector(AbstractProjector):
 
     def generate_sketch_matrix(self, generator_state):
         if not self.proj_matrix_available:
-            self.proj_matrix = ch.empty(
+            self.proj_matrix = torch.empty(
                 self.grad_dim, self.block_size, dtype=self.dtype, device=self.device
             )
             self.proj_matrix_available = True
@@ -290,7 +287,7 @@ class BasicProjector(AbstractProjector):
         if isinstance(grads, dict):
             grads = vectorize(grads, device=self.device)
         grads = grads.to(dtype=self.dtype)
-        sketch = ch.zeros(
+        sketch = torch.zeros(
             size=(grads.size(0), self.proj_dim), dtype=self.dtype, device=self.device
         )
 
@@ -301,7 +298,7 @@ class BasicProjector(AbstractProjector):
                 self.generate_sketch_matrix(self.generator_states[0])
 
         if self.num_blocks == 1:
-            ch.matmul(grads.data, self.proj_matrix, out=sketch)
+            torch.matmul(grads.data, self.proj_matrix, out=sketch)
         else:
             for ind in range(self.num_blocks):
                 self.generate_sketch_matrix(self.generator_states[ind])
@@ -361,20 +358,20 @@ class CudaProjector(AbstractProjector):
         self.max_batch_size = max_batch_size
 
         if isinstance(device, str):
-            device = ch.device(device)
+            device = torch.device(device)
 
         if device.type != "cuda":
             err = "CudaProjector only works on a CUDA device; Either switch to a CUDA device, or use the BasicProjector"
             raise ValueError(err)
 
-        self.num_sms = ch.cuda.get_device_properties(device.index).multi_processor_count
+        self.num_sms = torch.cuda.get_device_properties(device.index).multi_processor_count
 
         try:
             import fast_jl
 
             # test run to catch at init time if projection goes through
             fast_jl.project_rademacher_8(
-                ch.zeros(8, 1_000, device="cuda"), 512, 0, self.num_sms
+                torch.zeros(8, 1_000, device="cuda"), 512, 0, self.num_sms
             )
         except ImportError:
             err = "You should make sure to install the CUDA projector for traker (called fast_jl).\
@@ -452,7 +449,7 @@ class ChunkedCudaProjector:
         if self.input_allocated:
             return
 
-        self.ch_input = ch.zeros(
+        self.ch_input = torch.zeros(
             size=(self.feat_bs, self.max_chunk_size),
             device=self.device,
             dtype=self.dtype,
@@ -469,7 +466,7 @@ class ChunkedCudaProjector:
 
     def project(self, grads, model_id):
         self.allocate_input()
-        ch_output = ch.zeros(
+        ch_output = torch.zeros(
             size=(self.feat_bs, self.proj_dim), device=self.device, dtype=self.dtype
         )
         pointer = 0
