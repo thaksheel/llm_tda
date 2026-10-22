@@ -49,7 +49,20 @@ class TDAEvaluation:
         metric,
         method,
     ):
+        scores = np.array([
+            [self._sim()[metric](vector, source) for source in source_vector]
+            for vector in eval_vector
+        ])
+        return self.compute_from_scores(source_data, eval_data, scores, topk, method)
+
+    @staticmethod
+    def compute_from_scores(source_data, eval_data, scores, topk, method):
+        """Evaluate an already aggregated query-by-source score matrix."""
+        if scores.shape != (len(eval_data), len(source_data)) or not np.isfinite(scores).all():
+            raise ValueError("Attribution scores must be finite and match query/source counts")
         topk = sorted(topk, reverse=True)
+        if not topk or min(topk) <= 0 or max(topk) > len(source_data):
+            raise ValueError("Retrieval cutoffs must be positive and within source count")
         y_scores, y_trues, precision, recall, rrs = (
             {k: [] for k in topk},
             {k: [] for k in topk},
@@ -57,10 +70,7 @@ class TDAEvaluation:
             {k: [] for k in topk},
             {k: [] for k in topk},
         )
-        for i, vector in enumerate(eval_vector):
-            sim_score = np.array(
-                [self._sim()[metric](vector, vector_s) for vector_s in source_vector]
-            )
+        for i, sim_score in enumerate(scores):
             y_trues_map = np.array(
                 [
                     int(eval_data["label"].tolist()[i] == label)
@@ -104,13 +114,13 @@ class TDAEvaluation:
         self,
         source_dataset: pd.DataFrame,
         eval_dataset: pd.DataFrame,
-        method: Literal["rept", "tracein", "rapid_in", "less", "lorif"],
+        method: Literal["rept", "tracin", "tracein", "rapid_in", "less", "lorif"],
         topk: List[int],
     ):
         source_signals, testing_signals = self.extract_features(
             source_dataset, eval_dataset, method
         )
-        metric = "dot" if method == "TracInLN" else "cosine"
+        metric = "dot" if method in ("tracin", "tracein") else "cosine"
         return self.compute_attribution(
             source_dataset, eval_dataset, source_signals, testing_signals,
             topk, metric, method,

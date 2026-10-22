@@ -1,6 +1,28 @@
 import json
 import math
+import hashlib
 from pathlib import Path
+
+
+def checkpoint_identity(checkpoint):
+    """Identify a resume ancestor by progress, adapter weights, and configuration."""
+    checkpoint = Path(checkpoint)
+    state = json.loads((checkpoint / "trainer_state.json").read_text(encoding="utf-8"))
+    weights = next((checkpoint / name for name in ("adapter_model.safetensors", "adapter_model.bin")
+                    if (checkpoint / name).is_file()), None)
+    if weights is None:
+        raise ValueError(f"Missing resume adapter weights: {checkpoint}")
+
+    def digest(path):
+        value = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                value.update(chunk)
+        return value.hexdigest()
+
+    return {"global_step": state["global_step"], "epoch": state["epoch"],
+            "adapter_sha256": digest(weights),
+            "adapter_config_sha256": digest(checkpoint / "adapter_config.json")}
 
 
 def get_lora_options(r,alpha,dropout):

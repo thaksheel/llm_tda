@@ -1,6 +1,7 @@
 import json
 import math
 import shutil
+import uuid
 from pathlib import Path
 import torch
 from datasets import load_from_disk, Dataset
@@ -19,6 +20,7 @@ from transformers import (
 from peft import PeftModel
 
 from .utils import get_tokenized_dataset
+from .run_ft import checkpoint_identity
 
 
 class EpochArtifactsCallback(TrainerCallback):
@@ -29,15 +31,64 @@ class EpochArtifactsCallback(TrainerCallback):
         self.trainer = None
         self.last_quarter = 0
         self.last_progress = 0
+        self.lr_interval = None
+        self.pending_lr = None
+        self.ancestors = []
 
     def on_train_begin(self, args, state, control, **kwargs):
         # Resume from the current epoch rather than replaying previous quarters.
         self.last_quarter = math.floor(float(state.epoch or 0) * 4 + 1e-8)
         total = getattr(state, "max_steps", 0)
         self.last_progress = (20 * getattr(state, "global_step", 0) // total) if total > 0 else 0
+        checkpoint = getattr(self.tuner, "resume_checkpoint", None)
+        if isinstance(checkpoint, (str, Path)):
+            metadata_path = Path(checkpoint) / "metadata.json"
+            if metadata_path.is_file():
+                parent = json.loads(metadata_path.read_text(encoding="utf-8"))
+                self.ancestors = list(parent.get("training_ancestors", []))
+                identity = checkpoint_identity(checkpoint)
+                if identity not in self.ancestors:
+                    self.ancestors.append(identity)
+                if parent.get("training_run_id"):
+                    self.tuner.training_run_id = parent["training_run_id"]
+            rate_path = Path(checkpoint) / "tracin_lr.json"
+            if rate_path.is_file():
+                saved = json.loads(rate_path.read_text(encoding="utf-8"))
+                if saved["global_step"] != state.global_step:
+                    raise ValueError("Saved TracIn learning-rate state does not match resume checkpoint")
+                self.lr_interval = saved["interval"]
+                self.tuner.training_run_id = saved["training_run_id"]
+                for ancestor in saved.get("training_ancestors", []):
+                    if ancestor not in self.ancestors:
+                        self.ancestors.append(ancestor)
+            elif state.epoch and not math.isclose(float(state.epoch), round(float(state.epoch)), abs_tol=1e-6):
+                print("Historical epoch learning rates are unavailable for this legacy recovery checkpoint.", flush=True)
+        self.tuner.tracin_interval = self.lr_interval
+        self.tuner.training_ancestors = list(self.ancestors)
+        return control
+
+    def on_step_begin(self, args, state, control, optimizer=None, **kwargs):
+        if optimizer is None:
+            return control
+        epoch = math.floor(float(state.epoch or 0) + 1e-8) + 1
+        if self.lr_interval is None or self.lr_interval["epoch"] != epoch:
+            self.lr_interval = {"epoch": epoch, "start_step": state.global_step,
+                                "end_step": state.global_step, "count": 0, "sum": 0.0,
+                                "complete_start": math.isclose(float(state.epoch or 0), epoch - 1, abs_tol=1e-6)}
+        rates = [float(group["lr"]) for group in optimizer.param_groups if group["params"]]
+        if not rates or any(not math.isclose(rate, rates[0]) for rate in rates):
+            raise ValueError("TracIn rate tracking requires a shared learning rate for trained parameter groups")
+        self.pending_lr = rates[0]
         return control
 
     def on_step_end(self, args, state, control, **kwargs):
+        if self.pending_lr is not None:
+            skipped = getattr(kwargs.get("optimizer"), "step_was_skipped", False)
+            self.lr_interval["sum"] += 0.0 if skipped else self.pending_lr
+            self.lr_interval["count"] += 1
+            self.lr_interval["end_step"] = state.global_step
+            self.tuner.tracin_interval = dict(self.lr_interval)
+            self.pending_lr = None
         total = getattr(state, "max_steps", 0)
         if total > 0:
             progress = 20 * state.global_step // total
@@ -61,6 +112,13 @@ class EpochArtifactsCallback(TrainerCallback):
     def on_save(self, args, state, control, **kwargs):
         if not getattr(args, "should_save", True):
             return control
+        if self.lr_interval is not None:
+            path = Path(args.output_dir) / f"checkpoint-{state.global_step}" / "tracin_lr.json"
+            pending = path.with_suffix(".json.tmp")
+            pending.write_text(json.dumps({"global_step": state.global_step,
+                "training_run_id": self.tuner.training_run_id, "interval": self.lr_interval,
+                "training_ancestors": self.ancestors}), encoding="utf-8")
+            pending.replace(path)
         epoch = state.epoch
         if epoch is not None and epoch >= 1 and abs(epoch - round(epoch)) < 1e-6:
             self.tuner.save_training_artifacts(
@@ -119,6 +177,10 @@ class Tuner:
         self.load_in_4bit = load_in_4bit
         self.max_length = 512
         self.source_fingerprint = None
+        self.training_run_id = uuid.uuid4().hex
+        self.resume_checkpoint = None
+        self.tracin_interval = None
+        self.training_ancestors = []
 
         # null fields
         self.model: PeftModel = None
@@ -167,6 +229,7 @@ class Tuner:
         save_model: bool = True,
         checkpoint_path: str = None,
     ):
+        self.resume_checkpoint = checkpoint_path
         dataset, model, tokenizer = self.initialize(lora_path=None)
         data_collator = DataCollatorForSeq2Seq(
             tokenizer=tokenizer, model=model, padding="longest"
@@ -254,6 +317,9 @@ class Tuner:
             "global_step": trainer.state.global_step,
             "trained_epochs": trainer.state.epoch,
             "recovery_saves_per_epoch": 4,
+            "training_run_id": self.training_run_id,
+            "training_ancestors": self.training_ancestors,
+            "tracin_learning_rate": self.tracin_interval,
         }
         (save_dir / "metadata.json").write_text(
             json.dumps(metadata, indent=2), encoding="utf-8"

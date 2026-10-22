@@ -14,12 +14,11 @@ from src.run_ft import (
 def main():
     print("Starting TDA pipeline; reading command-line arguments...", flush=True)
     # Keep RUN_PIPELINE.md updated when arguments, defaults, or behavior change.
-    # Record significant correctness/recovery changes in Changes.md.
     parser = ArgumentParser(description="Command line flags for TDA pipeline.")
 
 
     #============================#
-    #   lora_config(src/run_ft.py)   #
+    # lora_config(src/run_ft.py) #
     #============================#
     parser.add_argument("--r",
                         type=int,
@@ -38,7 +37,7 @@ def main():
 
 
     #============================#
-    #  training_args(src/run_ft.py)  #
+    #training_args(src/run_ft.py)#
     #============================#
     parser.add_argument("output_dir",
                         type=str,
@@ -71,7 +70,7 @@ def main():
 
 
     #============================#
-    #      tuner(src/run_ft.py)      #
+    #    tuner(src/run_ft.py)    #
     #============================#
     parser.add_argument("dataset",
                         type=str,
@@ -91,7 +90,7 @@ def main():
                         default="train")
 
     parser.add_argument("--method",
-                        choices=["rept"],
+                        choices=["rept", "tracin"],
                         help="Attribution method to run after training or artifact reuse",
                         default="rept")
 

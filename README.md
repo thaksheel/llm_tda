@@ -2,8 +2,8 @@
 
 See [the pipeline guide](RUN_PIPELINE.md) for current controller arguments,
 training examples, and saved artifacts.
-See [significant changes](Changes.md) for corrections affecting results and
-checkpoint recovery.
+See [method changes](Changes.md) for attribution corrections and numerical choices
+affecting results.
 
 `run_pipeline.py` is the command-line entry point. Training and attribution
 helpers live in `src/`, regression tests in `tests/`, and bundled method code

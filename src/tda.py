@@ -29,16 +29,14 @@ class TDA:
 
     def trace(
         self,
-        method: Literal["rept", "tracein", "rapid_in", "less", "lorif"],
+        method: Literal["rept", "tracin", "tracein", "rapid_in", "less", "lorif"],
         prompt: str,
         expected_response: str,
     ) -> NDArray:
         if method == "rept":
             return self.rept(prompt, expected_response, layer=self.params.layer)
-        elif method == "tracein":
-            return self.trace_in(
-                prompt, expected_response, layer_norm=self.params.layer_norm
-            )
+        elif method in ("tracin", "tracein"):
+            return self.trace_in(prompt, expected_response)
         elif method == "less":
             return self.less(
                 prompt, expected_response, optimizer_state=self.params.optimizer_state
@@ -152,30 +150,35 @@ class TDA:
         gradient_vector = self.random_projection(gradient_vector)
         return gradient_vector.cpu().numpy()
 
-    def get_gradient_vector(self, prompt, expected_response) -> torch.Tensor:
-        self.model.train()
+    def get_gradient_vector(self, prompt, expected_response, parameter_names=None) -> torch.Tensor:
+        """Response-loss gradients in an explicit, reproducible parameter order."""
+        self.model.eval()
         self.model.zero_grad()
         inputs = self.get_tokenized_text(
             self.tokenizer,
             {"prompts": prompt, "response": expected_response},
             device=self.device,
         )
-        outputs = self.model.forward(**inputs)
-        loss: torch.Tensor = outputs["loss"]
-        loss.backward()
-        gv = torch.cat(
-            [
-                p.grad.view(-1)
-                for n, p in self.model.named_parameters()
-                if p.grad is not None
-            ]
-        )
+        parameters = dict(self.model.named_parameters())
+        names = parameter_names if parameter_names is not None else [
+            name for name, parameter in parameters.items() if parameter.requires_grad
+        ]
+        if not names or len(names) != len(set(names)):
+            raise ValueError("Gradient parameter names must be nonempty and unique")
+        selected = [parameters[name] for name in names]
+        loss = self.model(**inputs)["loss"]
+        if not torch.isfinite(loss):
+            raise ValueError("Nonfinite response loss; check response tokens after truncation")
+        gradients = torch.autograd.grad(loss, selected, allow_unused=True)
+        gv = torch.cat([
+            (gradient if gradient is not None else torch.zeros_like(parameter)).reshape(-1).float()
+            for gradient, parameter in zip(gradients, selected)
+        ])
         return gv.detach()
 
-    def trace_in(self, prompt: str, expected_response: str, layer_norm: bool = True):
+    def trace_in(self, prompt: str, expected_response: str):
+        """Unnormalized single-checkpoint features for TracInCP dot products."""
         gv = self.get_gradient_vector(prompt, expected_response)
-        if layer_norm:
-            gv = F.layer_norm(gv, normalized_shape=[gv.shape[-1]])
         gv = gv.view(-1).to(torch.float32)
         return gv.cpu().numpy()
 
