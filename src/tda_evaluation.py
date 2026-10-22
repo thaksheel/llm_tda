@@ -6,7 +6,8 @@ from sklearn.metrics import average_precision_score
 from peft import PeftModel
 from tqdm import tqdm
 
-from . import Result, TDA, Params
+from .utils import Result, Params
+from .tda import TDA
 
 
 class TDAEvaluation:
@@ -106,8 +107,18 @@ class TDAEvaluation:
         method: Literal["rept", "tracein", "rapid_in", "less", "lorif"],
         topk: List[int],
     ):
-        source_signals, testing_signals = [], []
+        source_signals, testing_signals = self.extract_features(
+            source_dataset, eval_dataset, method
+        )
         metric = "dot" if method == "TracInLN" else "cosine"
+        return self.compute_attribution(
+            source_dataset, eval_dataset, source_signals, testing_signals,
+            topk, metric, method,
+        )
+
+    def extract_features(self, source_dataset, eval_dataset, method):
+        """Compute source/query vectors separately from ranking metrics."""
+        source_signals, testing_signals = [], []
         for i, row in tqdm(source_dataset.iterrows(), total=source_dataset.shape[0]):
             source_signals.append(
                 self.tda.trace(
@@ -124,13 +135,4 @@ class TDAEvaluation:
                     expected_response=row["expected_response"],
                 )
             )
-        results = self.compute_attribution(
-            source_dataset,
-            eval_dataset,
-            source_signals,
-            testing_signals,
-            topk,
-            metric,
-            method,
-        )
-        return results
+        return source_signals, testing_signals

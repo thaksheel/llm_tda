@@ -1,5 +1,14 @@
 # LLM TDA Methods
 
+See [the pipeline guide](RUN_PIPELINE.md) for current controller arguments,
+training examples, and saved artifacts.
+See [significant changes](Changes.md) for corrections affecting results and
+checkpoint recovery.
+
+`run_pipeline.py` is the command-line entry point. Training and attribution
+helpers live in `src/`, regression tests in `tests/`, and bundled method code
+in `modules/`. See the pipeline guide for the package layout and commands.
+
 This repository is a work in progress focused on building a pipeline for training data attribution (TDA) in large language model (LLM) settings.
 
 The goal is to implement and evaluate the latest training data analysis (TDA) attributing model behavior back to training data. The project is centered on understanding how examples in the training set affect model outputs, metrics, and downstream performance across attribution and influence analysis. 

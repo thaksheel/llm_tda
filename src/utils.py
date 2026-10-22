@@ -1,9 +1,7 @@
 from dataclasses import dataclass
-from typing import Literal, Optional, Dict, List 
+from typing import Dict
 from datasets import Dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM, TokenizersBackend
 from transformers import TokenizersBackend
-from peft import PeftModel
 
 
 @dataclass
@@ -32,7 +30,7 @@ class Params:
     layer: int = -1
     optimizer_state: Dict = None # load optimizer.pt then query for ['state']
 
-def tokenize(tokenizer: TokenizersBackend, sample: Dict, max_length=512):
+def tokenize(sample: Dict, tokenizer: TokenizersBackend, max_length=512):
     if tokenizer.chat_template:
         message = [
             {"role": "user", "content": sample["prompts"]},
@@ -40,7 +38,7 @@ def tokenize(tokenizer: TokenizersBackend, sample: Dict, max_length=512):
         ]
         full_text = tokenizer.apply_chat_template(message, tokenize=False)
         full_tokenized = tokenizer(
-            full_text, truncation=True, max_length=512, padding=False
+            full_text, truncation=True, max_length=max_length, padding=False
         )
         prompt_only_text = tokenizer.apply_chat_template(
             [message[0]], tokenize=False, add_generation_prompt=True
@@ -62,7 +60,7 @@ def tokenize(tokenizer: TokenizersBackend, sample: Dict, max_length=512):
             + tokenizer.eos_token
         )
         full_tokenized = tokenizer(
-            full_text, truncation=True, max_length=512, padding=False
+            full_text, truncation=True, max_length=max_length, padding=False
         )
         prompt_length = len(
             tokenizer(
@@ -83,7 +81,6 @@ def tokenize(tokenizer: TokenizersBackend, sample: Dict, max_length=512):
     }
 
 def get_tokenized_dataset(
-    self,
     tokenizer: TokenizersBackend,
     dataset: Dataset,
     max_length=512,

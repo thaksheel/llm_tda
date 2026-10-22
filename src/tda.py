@@ -5,11 +5,11 @@ import random
 from typing import Dict, List, Optional, Literal
 from datasets import Dataset
 from transformers import TokenizersBackend
-from transformers import TokenizersBackend
 from peft import PeftModel
 from numpy.typing import NDArray
 
-from . import Params, BasicProjector, ProjectionType
+from .utils import Params
+from modules import BasicProjector, ProjectionType
 
 
 class TDA:
@@ -213,7 +213,8 @@ class TDA:
         expected_response,
         layer,
     ) -> NDArray:
-        self.model.train() 
+        # Evaluation mode disables dropout without disabling autograd.
+        self.model.eval()
         self.model.zero_grad()
         self.model.config.use_cache = False
         # model.set_requires_grad(requires_grad=True)
@@ -237,7 +238,9 @@ class TDA:
         torch.cuda.empty_cache()
         # [0, 0, ..., 0, 0, r_response_1, ..., r_response_n, 0]
         cg: torch.Tensor = captured_grads[0][0][prompt_len - 1 : -1].to(torch.float32)
-        return cg.view(-1).cpu().numpy()
+        # Preserve [response tokens, hidden dimensions] so RepT's [0] selects
+        # the first token's entire gradient rather than a single coordinate.
+        return cg.cpu().numpy()
 
     def rept(
         self,

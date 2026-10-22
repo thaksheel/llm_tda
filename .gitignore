@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 
 # Virtual environments
+.venv/
 venv/
 .env/
 
@@ -15,9 +16,11 @@ Thumbs.db
 data/
 exports/
 out/ 
+output/
 datasets/
 lora_adapter/
 temp/
+tests/
 
 .env
 *.pyc
