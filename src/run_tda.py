@@ -2,7 +2,8 @@ import json
 import hashlib
 import math
 from pathlib import Path
-from .gradient_cache import gradient_directory, score_directory
+from .gradient_cache import cache_key, gradient_directory, score_directory
+from .less import feature_identity as less_identity, projected_features as less_features
 
 def run_attribution(
     artifact_dir, source_path, query_path, method="rept", *,
@@ -10,13 +11,14 @@ def run_attribution(
     source_limit=None, query_limit=None,
 ):
     """Dispatch attribution calls from the pipeline."""
-    if method == "tracin":
-        return run_tracin(
+    if method in ("tracin", "less"):
+        runner = run_tracin if method == "tracin" else run_less
+        return runner(
             artifact_dir, source_path, query_path, output_dir=output_dir,
             device=device, topk=topk, source_limit=source_limit, query_limit=query_limit,
         )
     if method != "rept":
-        raise ValueError("Supported methods are 'rept' and 'tracin'")
+        raise ValueError("Supported methods are 'rept', 'tracin', and 'less'")
     return run_rept(
         artifact_dir, source_path, query_path, output_dir=output_dir, device=device, topk=topk,
         layer=layer, source_limit=source_limit, query_limit=query_limit,
@@ -480,7 +482,8 @@ def _gradient_rows(directory, kind, frame, response, identity, extract):
     return matrix
 
 
-def _checkpoint_scores(directory, matrices, identity, weight, progress_factory, device="cpu"):
+def _checkpoint_scores(directory, matrices, identity, weight, progress_factory, device="cpu", *,
+                       score_key=None, label="TracIn"):
     """Reuse completed checkpoint contributions without double-counting on restart."""
     import numpy as np
     from zipfile import BadZipFile
@@ -488,7 +491,7 @@ def _checkpoint_scores(directory, matrices, identity, weight, progress_factory, 
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "checkpoint_scores.npz"
     complete = directory / "scores_complete.json"
-    key = _score_identity(identity, weight, device)
+    key = _score_identity(identity, weight, device) if score_key is None else score_key
     shape = (len(matrices[1]), len(matrices[0]))
     try:
         if _read_json(complete) != key:
@@ -503,7 +506,7 @@ def _checkpoint_scores(directory, matrices, identity, weight, progress_factory, 
         pass
     complete.unlink(missing_ok=True)
     scores = np.zeros(shape, dtype=np.float64)
-    with progress_factory(total=shape[0] * shape[1], unit="pair", desc="TracIn scoring") as progress:
+    with progress_factory(total=shape[0] * shape[1], unit="pair", desc=f"{label} scoring") as progress:
         _accumulate_tracin(scores, matrices[0], matrices[1], weight, progress=progress.update, device=device)
     pending = path.with_name(path.name + ".tmp")
     with pending.open("wb") as stream:
@@ -523,6 +526,28 @@ def run_tracin(
     topk=(1, 5, 10), source_limit=None, query_limit=None,
 ):
     """TracInCP: sum learning-rate-weighted adapter-gradient dot products."""
+    return _run_gradient_attribution(
+        artifact_dir, source_path, query_path, output_dir=output_dir, device=device,
+        topk=topk, source_limit=source_limit, query_limit=query_limit, method="tracin",
+    )
+
+
+def run_less(
+    artifact_dir, source_path, query_path, *, output_dir="output", device="cuda",
+    topk=(1, 5, 10), source_limit=None, query_limit=None,
+):
+    """LESS: projected source Adam directions versus projected query gradients."""
+    return _run_gradient_attribution(
+        artifact_dir, source_path, query_path, output_dir=output_dir, device=device,
+        topk=topk, source_limit=source_limit, query_limit=query_limit, method="less",
+    )
+
+
+def _run_gradient_attribution(
+    artifact_dir, source_path, query_path, *, output_dir, device, topk,
+    source_limit, query_limit, method,
+):
+    """Share checkpoint validation and raw gradient extraction across methods."""
     import gc
     import numpy as np
     import pandas as pd
@@ -550,19 +575,19 @@ def run_tracin(
         raise ValueError("Retrieval cutoffs and query labels must have supporting selected sources")
     metadata = _read_json(Path(artifact_dir) / "metadata.json")
     if dataset._fingerprint != metadata["source_fingerprint"]:
-        raise ValueError("Training source fingerprint does not match TracIn sources")
+        raise ValueError("Training source fingerprint does not match attribution sources")
     checkpoints = _tracin_checkpoints(artifact_dir, output_dir)
     target_device = torch.device(device)
     if metadata["load_in_4bit"] and target_device.type != "cuda":
-        raise ValueError("These 4-bit training checkpoints require CUDA for matching TracIn model loading")
+        raise ValueError("These 4-bit training checkpoints require CUDA for matching gradient model loading")
     if target_device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable")
-    method_dir = Path(output_dir) / "tracin" / f"epoch-{float(metadata['trained_epochs']):g}"
+    method_dir = Path(output_dir) / method / f"epoch-{float(metadata['trained_epochs']):g}"
     method_dir.mkdir(parents=True, exist_ok=True)
     (method_dir / "complete.json").unlink(missing_ok=True)
     (method_dir / "metrics.xlsx").unlink(missing_ok=True)
     scores = np.zeros((len(queries), len(sources)), dtype=np.float64)
-    manifest = {"model_name": metadata["model_name"], "method": "tracin", "feature_version": "tracincp-adapter-dot-v1",
+    manifest = {"model_name": metadata["model_name"], "method": method, "feature_version": "tracincp-adapter-dot-v1",
                 "scoring_device": str(target_device), "scoring_version": "tracin-checkpoint-dot-v2",
                 "scoring_precision": "float32-ieee",
                 "formula": "sum_c mean_epoch_learning_rate_c * query_gradient_c @ source_gradient_c.T",
@@ -578,9 +603,25 @@ def run_tracin(
                 "source_fingerprint": dataset._fingerprint, "query_sha256": _sha256_file(query_path),
                 "source_limit": source_limit, "query_limit": query_limit,
                 "device": str(target_device), "checkpoints": []}
+    if method == "less":
+        total_weight = sum(weight for _, weight, _ in checkpoints)
+        if not math.isfinite(total_weight) or total_weight <= 0:
+            raise ValueError("LESS needs a positive sum of checkpoint learning rates")
+        manifest.update(
+            scoring_version="less-reference-adam-cosine-v1",
+            formula="sum_c normalized_mean_epoch_learning_rate_c * cosine(project(query_gradient), project(source_adam_direction))",
+            normalization="row L2 after projection; checkpoint weights sum to one",
+            source_transform="reference Adam moments without bias correction; epsilon inside sqrt",
+            query_transform="untransformed raw gradient",
+            evaluation="per-query attribution; no task averaging or subset retraining",
+        )
+        # Fail before gradient extraction if optimizer files are missing.
+        for checkpoint, _, _ in checkpoints:
+            if not (checkpoint / "optimizer.pt").is_file():
+                raise ValueError(f"LESS needs saved optimizer moments: {checkpoint / 'optimizer.pt'}")
     for checkpoint, weight, weight_source in checkpoints:
         state = _read_json(checkpoint / "metadata.json")
-        print(f"TracIn epoch {state['trained_epochs']}: weight={weight:.8g}; checking saved gradients...", flush=True)
+        print(f"{'LESS' if method == 'less' else 'TracIn'} epoch {state['trained_epochs']}: weight={weight:.8g}; checking saved gradients...", flush=True)
         parameter_metadata = _read_json(checkpoint / "optimizer_parameters.json")
         dimensions = sum(math.prod(parameter["shape"]) for group in parameter_metadata for parameter in group)
         entry = {"artifact_dir": str(checkpoint.resolve()), "global_step": state["global_step"],
@@ -596,8 +637,15 @@ def run_tracin(
             _gradient_identity(entry, manifest, queries, "expected_response"),
         ]
         directory = gradient_directory(output_dir, identities)
-        score_dir = score_directory(output_dir, _score_identity(identities, weight, str(target_device)))
         entry["gradient_cache"] = str(directory.relative_to(Path(output_dir)))
+        if method == "less":
+            processed_identity = less_identity(identities, _sha256_file(checkpoint / "optimizer.pt"), target_device)
+            checkpoint_key = {"version": "less-cosine-v1", "features": processed_identity,
+                              "scoring_device": str(target_device), "precision": "float32-ieee"}
+            score_dir = Path(output_dir) / "less" / "checkpoint_scores" / cache_key(checkpoint_key)
+            entry["normalized_weight"] = weight / total_weight
+        else:
+            score_dir = score_directory(output_dir, _score_identity(identities, weight, str(target_device)))
         entry["score_cache"] = str(score_dir.relative_to(Path(output_dir)))
         required_bytes = (len(sources) + len(queries)) * entry["dimensions"] * 4
         print(f"Raw gradient storage: approximately {required_bytes / 2**30:.2f} GiB per checkpoint (existing compatible files are reused)", flush=True)
@@ -638,8 +686,20 @@ def run_tracin(
                 torch.cuda.empty_cache()
         _write_json(directory / "feature_metadata.json", entry)
         _write_json(directory / "features_complete.json", {"feature_version": manifest["feature_version"]})
-        print("Accumulating checkpoint gradient dot products...", flush=True)
-        scores += _checkpoint_scores(score_dir, matrices, identities, weight, tqdm, device=str(target_device))
+        if method == "less":
+            processed_dir, processed = less_features(
+                output_dir, matrices, processed_identity, checkpoint, parameter_metadata, str(target_device),
+            )
+            entry["feature_cache"] = str(processed_dir.relative_to(Path(output_dir)))
+            print("Accumulating LESS checkpoint cosine similarities...", flush=True)
+            scores += entry["normalized_weight"] * _checkpoint_scores(
+                score_dir, processed, identities, 1.0, tqdm, device=str(target_device),
+                score_key=checkpoint_key, label="LESS",
+            )
+            del processed
+        else:
+            print("Accumulating checkpoint gradient dot products...", flush=True)
+            scores += _checkpoint_scores(score_dir, matrices, identities, weight, tqdm, device=str(target_device))
         manifest["checkpoints"].append(entry)
         del matrices
         gc.collect()
@@ -649,11 +709,11 @@ def run_tracin(
                             query_indices=queries.index.to_numpy(dtype=np.int64))
     pending.replace(method_dir / "scores.npz")
     _write_json(method_dir / "feature_metadata.json", manifest)
-    results = TDAEvaluation.compute_from_scores(sources, queries, scores, topk, "tracin")
+    results = TDAEvaluation.compute_from_scores(sources, queries, scores, topk, method)
     metrics = pd.DataFrame([result.__dict__ for result in results])
     metrics.to_excel(method_dir / "metrics.xlsx", index=False)
     _write_json(method_dir / "complete.json", {"feature_version": manifest["feature_version"]})
-    print(f"Saved TracIn gradients, scores, and metrics: {method_dir}", flush=True)
+    print(f"Saved {method} gradients, scores, and metrics: {method_dir}", flush=True)
     return metrics
 
 

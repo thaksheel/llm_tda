@@ -90,7 +90,7 @@ def main():
                         default="train")
 
     parser.add_argument("--method",
-                        choices=["rept", "tracin"],
+                        choices=["rept", "tracin", "less"],
                         help="Attribution method to run after training or artifact reuse",
                         default="rept")
 

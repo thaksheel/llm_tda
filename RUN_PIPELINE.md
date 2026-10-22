@@ -38,6 +38,7 @@ python run_pipeline.py output/save-test \
 ```
 
 Use `--method tracin` for the same small TracIn test.
+Use `--method less` for LESS with 8,192-dimensional projected features.
 For training only, use `--stage train` (the default).
 
 Run full TracIn attribution using two existing completed epochs:
@@ -63,9 +64,9 @@ python run_pipeline.py output/save-test \
 | Flag | Default | Use |
 | --- | --- | --- |
 | `--stage` | `train` | `train`: training only; `tda`: attribution only; `all`: both. |
-| `--method` | `rept` | Attribution method: `rept` or `tracin`. |
+| `--method` | `rept` | Attribution method: `rept`, `tracin`, or `less`. |
 | `--device` | `cuda` | Attribution device, e.g. `cuda:0` or `cpu`. TracIn scoring uses it too. Training uses automatic placement; 4-bit gradient extraction requires CUDA. |
-| `--epochs` | `3` | Total training target or completed epoch to analyze. RepT uses that epoch; TracIn combines epochs 1 through this value. |
+| `--epochs` | `3` | Total training target or completed epoch to analyze. RepT uses that epoch; TracIn and LESS combine epochs 1 through this value. |
 | `--sources` | All | Total attribution source limit, balanced across labels when possible. |
 | `--queries` | All | Total attribution query limit, balanced across labels when possible. |
 | `--topk` | `1 5 10 30 50 100 250 500 1000` | Retrieval cutoffs; none may exceed the selected source count. |
@@ -101,42 +102,10 @@ selected source labels.
   Older partial gradient files without saved row progress must be recomputed.
 - Gradients and checkpoint scores are shared across epoch selections. After a
   two-epoch run, `--epochs 1` reuses epoch 1 without extracting or scoring again.
+- LESS reuses matching raw gradients from TracIn, then saves its own projected
+  features and cosine scores. Repeat the command to reuse them; interrupted
+  projection resumes from its last completed batch. Saved AdamW moments are required.
 - RepT features are recomputed on each attribution run. Do not run two writers
   against the same output directory at once.
-
-## Saved files and moving drives
-
-```text
-OUTPUT_DIR/
-  checkpoint-N/                   # Saved training epochs/recovery points
-  gradients/CACHE_ID/              # Raw gradients, row mappings, metadata, resume files
-  rept/epoch-N/                   # RepT features, row mappings, metadata, metrics.xlsx
-  tracin/checkpoint_scores/SCORE_ID/ # Completed weighted checkpoint scores
-  tracin/epoch-N/
-    scores.npz                    # Combined query-by-source scores
-    metrics.xlsx
-```
-
-Final training artifacts are stored separately at `lora_adapter/<model>/<dataset>/`.
-For the example: `lora_adapter/TinyLlama/TinyLlama-1.1B-Chat-v1.0/data/datasets/harmful-tuning/`.
-
-Full TracIn gradients for the example dataset/model need about **110 GiB per
-checkpoint**. Ensure the output drive has room. To move outputs, wait until the
-run stops, move the entire directory containing checkpoints and method results,
-then use its new location as `OUTPUT_DIR`. For example, moving `output` to
-`Y:\output` makes the argument `/mnt/y/output/save-test`. Continue launching
-from the repo so relative dataset/adapter paths resolve.
-
-Optional lossless-compression sample test (original gradients are unchanged):
-
-```bash
-python -m src.check_compression \
-  output/save-test/gradients/CACHE_ID/query_features.npy
-```
-
-Replace `CACHE_ID` with the saved cache directory name. This saves eight sampled
-rows to a separate gzip file and verifies exact recovery.
-Use `--rows`, `--level`, or `--output` to customize the test. Gzip samples are not
-loaded by the pipeline.
 
 Method corrections and numerical choices: [Changes.md](Changes.md).
