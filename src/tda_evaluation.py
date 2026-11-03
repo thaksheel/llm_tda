@@ -1,9 +1,10 @@
+from typing import List, Literal
+
 import numpy as np
-from typing import Literal, List, Optional, Dict, Any
 import pandas as pd
 import torch
-from sklearn.metrics import average_precision_score
 from peft import PeftModel
+from sklearn.metrics import average_precision_score
 from tqdm import tqdm
 
 from .utils import Result, Params
@@ -58,6 +59,8 @@ class TDAEvaluation:
     @staticmethod
     def compute_from_scores(source_data, eval_data, scores, topk, method):
         """Evaluate an already aggregated query-by-source score matrix."""
+        from src.relevance import label_set
+
         if scores.shape != (len(eval_data), len(source_data)) or not np.isfinite(scores).all():
             raise ValueError("Attribution scores must be finite and match query/source counts")
         topk = sorted(topk, reverse=True)
@@ -70,11 +73,13 @@ class TDAEvaluation:
             {k: [] for k in topk},
             {k: [] for k in topk},
         )
+        source_labels = [label_set(value) for value in source_data["label"]]
+        query_labels = [label_set(value) for value in eval_data["label"]]
         for i, sim_score in enumerate(scores):
             y_trues_map = np.array(
                 [
-                    int(eval_data["label"].tolist()[i] == label)
-                    for label in source_data["label"]
+                    int(bool(query_labels[i] & label))
+                    for label in source_labels
                 ]
             )
             top_max_k_indices = np.argsort(sim_score)[-topk[0] :]

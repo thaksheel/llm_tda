@@ -1,9 +1,14 @@
-import json
 import hashlib
+import json
 import math
 from pathlib import Path
+
 from .gradient_cache import cache_key, gradient_directory, score_directory
 from .less import feature_identity as less_identity, projected_features as less_features
+from .rapid_in import feature_identity as rapid_identity, compressed_features as rapid_features
+from .trackstar import feature_identity as trackstar_identity, projected_features as trackstar_features
+from .relevance import missing_query_labels, selection_key
+
 
 def run_attribution(
     artifact_dir, source_path, query_path, method="rept", *,
@@ -11,14 +16,33 @@ def run_attribution(
     source_limit=None, query_limit=None,
 ):
     """Dispatch attribution calls from the pipeline."""
-    if method in ("tracin", "less"):
-        runner = run_tracin if method == "tracin" else run_less
+    if method == "logra":
+        from .logra import run_logra
+        return run_logra(
+            artifact_dir, source_path, query_path, output_dir=output_dir, device=device,
+            topk=topk, source_limit=source_limit, query_limit=query_limit,
+        )
+    if method == "trak":
+        from .trak import run_trak
+        return run_trak(
+            artifact_dir, source_path, query_path, output_dir=output_dir, device=device,
+            topk=topk, source_limit=source_limit, query_limit=query_limit,
+        )
+    if method == "lorif":
+        from .lorif import run_lorif
+        return run_lorif(
+            artifact_dir, source_path, query_path, output_dir=output_dir, device=device,
+            topk=topk, source_limit=source_limit, query_limit=query_limit,
+        )
+    if method in ("tracin", "less", "rapid_in", "trackstar"):
+        runner = {"tracin": run_tracin, "less": run_less, "rapid_in": run_rapid_in,
+                  "trackstar": run_trackstar}[method]
         return runner(
             artifact_dir, source_path, query_path, output_dir=output_dir,
             device=device, topk=topk, source_limit=source_limit, query_limit=query_limit,
         )
     if method != "rept":
-        raise ValueError("Supported methods are 'rept', 'tracin', and 'less'")
+        raise ValueError("Supported methods are 'rept', 'tracin', 'less', 'rapid_in', 'lorif', 'trak', 'logra', and 'trackstar'")
     return run_rept(
         artifact_dir, source_path, query_path, output_dir=output_dir, device=device, topk=topk,
         layer=layer, source_limit=source_limit, query_limit=query_limit,
@@ -68,7 +92,7 @@ def run_rept(
     queries = _limit_by_label(queries, query_limit)
     if topk[-1] > len(sources):
         raise ValueError(f"Largest topk ({topk[-1]}) exceeds source count ({len(sources)})")
-    unsupported = set(queries["label"]) - set(sources["label"])
+    unsupported = missing_query_labels(sources, queries)
     if unsupported:
         raise ValueError(
             f"Query labels have no matching selected sources: {unsupported}. "
@@ -148,7 +172,8 @@ def _limit_by_label(frame, limit):
     if limit is None:
         return frame.copy()
     # Take examples round-robin across labels instead of only the first class.
-    order = frame.groupby("label", sort=False).cumcount().sort_values(kind="stable").index
+    keys = frame["label"].map(selection_key)
+    order = frame.groupby(keys, sort=False).cumcount().sort_values(kind="stable").index
     return frame.loc[order[:limit]].copy()
 
 
@@ -432,7 +457,7 @@ def _gradient_rows(directory, kind, frame, response, identity, extract):
             raise ValueError("gradient file shape, dtype, or length changed")
     except (OSError, ValueError, KeyError, TypeError) as error:
         if path.exists() or progress_path.exists():
-            print(f"Saved TracIn {kind} gradients cannot be reused: {error}", flush=True)
+            print(f"Saved raw {kind} gradients cannot be reused: {error}", flush=True)
         matrix = None
         completed = 0
 
@@ -449,11 +474,11 @@ def _gradient_rows(directory, kind, frame, response, identity, extract):
         progress_path.unlink(missing_ok=True)
         matrix = np.lib.format.open_memmap(path, mode="w+", dtype=np.float32, shape=tuple(identity["shape"]))
         _write_json(progress_path, {"identity": identity, "completed_rows": 0})
-        print(f"Extracting TracIn {kind} gradients: {len(frame)} rows", flush=True)
+        print(f"Extracting raw {kind} gradients: {len(frame)} rows", flush=True)
     elif completed == len(frame):
-        print(f"Reusing TracIn {kind} gradients: {completed}/{len(frame)} rows", flush=True)
+        print(f"Reusing raw {kind} gradients: {completed}/{len(frame)} rows", flush=True)
     else:
-        print(f"Resuming TracIn {kind} gradients at row {completed}/{len(frame)}", flush=True)
+        print(f"Resuming raw {kind} gradients at row {completed}/{len(frame)}", flush=True)
 
     if completed == len(frame):
         _write_json(progress_path, {"identity": identity, "completed_rows": completed})
@@ -466,7 +491,7 @@ def _gradient_rows(directory, kind, frame, response, identity, extract):
 
     (directory / "features_complete.json").unlink(missing_ok=True)
     try:
-        for row in tqdm(range(completed, len(frame)), initial=completed, total=len(frame), desc=f"TracIn {kind}"):
+        for row in tqdm(range(completed, len(frame)), initial=completed, total=len(frame), desc=f"Raw {kind} gradients"):
             sample = frame.iloc[row]
             vector = extract(sample["prompts"], sample[response])
             if vector.shape != (identity["shape"][1],) or not np.isfinite(vector).all():
@@ -543,6 +568,28 @@ def run_less(
     )
 
 
+def run_rapid_in(
+    artifact_dir, source_path, query_path, *, output_dir="output", device="cuda",
+    topk=(1, 5, 10), source_limit=None, query_limit=None,
+):
+    """Sample-level RapidIn using the selected completed checkpoint only."""
+    return _run_gradient_attribution(
+        artifact_dir, source_path, query_path, output_dir=output_dir, device=device,
+        topk=topk, source_limit=source_limit, query_limit=query_limit, method="rapid_in",
+    )
+
+
+def run_trackstar(
+    artifact_dir, source_path, query_path, *, output_dir="output", device="cuda",
+    topk=(1, 5, 10), source_limit=None, query_limit=None,
+):
+    """TrackStar with saved LoRA AdamW correction, mixed curvature, and cosine."""
+    return _run_gradient_attribution(
+        artifact_dir, source_path, query_path, output_dir=output_dir, device=device,
+        topk=topk, source_limit=source_limit, query_limit=query_limit, method="trackstar",
+    )
+
+
 def _run_gradient_attribution(
     artifact_dir, source_path, query_path, *, output_dir, device, topk,
     source_limit, query_limit, method,
@@ -571,12 +618,13 @@ def _run_gradient_attribution(
         if not set(required) <= set(frame.columns) or frame.empty or frame[required].isna().any().any():
             raise ValueError(f"Prepared data needs nonempty values for {required}")
     sources, queries = _limit_by_label(sources, source_limit), _limit_by_label(queries, query_limit)
-    if topk[-1] > len(sources) or set(queries["label"]) - set(sources["label"]):
+    if topk[-1] > len(sources) or missing_query_labels(sources, queries):
         raise ValueError("Retrieval cutoffs and query labels must have supporting selected sources")
     metadata = _read_json(Path(artifact_dir) / "metadata.json")
     if dataset._fingerprint != metadata["source_fingerprint"]:
         raise ValueError("Training source fingerprint does not match attribution sources")
-    checkpoints = _tracin_checkpoints(artifact_dir, output_dir)
+    checkpoints = ([(Path(artifact_dir), 1.0, "single-selected-checkpoint")] if method in ("rapid_in", "trackstar")
+                   else _tracin_checkpoints(artifact_dir, output_dir))
     target_device = torch.device(device)
     if metadata["load_in_4bit"] and target_device.type != "cuda":
         raise ValueError("These 4-bit training checkpoints require CUDA for matching gradient model loading")
@@ -603,6 +651,31 @@ def _run_gradient_attribution(
                 "source_fingerprint": dataset._fingerprint, "query_sha256": _sha256_file(query_path),
                 "source_limit": source_limit, "query_limit": query_limit,
                 "device": str(target_device), "checkpoints": []}
+    label = {"tracin": "TracIn", "less": "LESS", "rapid_in": "RapidIn", "trackstar": "TrackStar"}[method]
+    if method == "trackstar":
+        manifest.update(
+            scoring_version="trackstar-lora-adamw-cosine-v1",
+            formula="cosine(R^-1/2 project(sum_query_gradient / (sqrt(V)+eps)), R^-1/2 project(sum_source_gradient / (sqrt(V)+eps)))",
+            normalization="global row L2 after block whitening",
+            checkpoint_selection="selected-completed-epoch",
+            learning_rate_convention="not used; selected checkpoint only",
+            second_moment="saved AdamW exp_avg_sq for both source and query; no first-moment update",
+            curvature="0.1 * source.T @ source + 0.9 * query.T @ query per projection block",
+            parameter_selection="saved trainable LoRA parameters; adaptation from full-model Adafactor",
+        )
+        # Raw-cache identity retains its actual mean-loss definition.
+        manifest["feature_transform_loss"] = "response-token-sum after multiplying cached gradients by valid token counts"
+        if not (Path(artifact_dir) / "optimizer.pt").is_file():
+            raise ValueError("TrackStar needs saved optimizer second moments")
+    if method == "rapid_in":
+        manifest.update(
+            scoring_version="rapidin-signed-dot-v1",
+            formula="dot(compress(parameter_l2(query_gradient)), compress(parameter_l2(source_gradient)))",
+            normalization="per-parameter L2 before padding; no normalization after compression",
+            checkpoint_selection="selected-completed-epoch",
+            learning_rate_convention="not used; selected checkpoint only",
+            evaluation="sample-level response attribution; no token-wise refinement",
+        )
     if method == "less":
         total_weight = sum(weight for _, weight, _ in checkpoints)
         if not math.isfinite(total_weight) or total_weight <= 0:
@@ -621,7 +694,7 @@ def _run_gradient_attribution(
                 raise ValueError(f"LESS needs saved optimizer moments: {checkpoint / 'optimizer.pt'}")
     for checkpoint, weight, weight_source in checkpoints:
         state = _read_json(checkpoint / "metadata.json")
-        print(f"{'LESS' if method == 'less' else 'TracIn'} epoch {state['trained_epochs']}: weight={weight:.8g}; checking saved gradients...", flush=True)
+        print(f"{label} epoch {state['trained_epochs']}: weight={weight:.8g}; checking saved gradients...", flush=True)
         parameter_metadata = _read_json(checkpoint / "optimizer_parameters.json")
         dimensions = sum(math.prod(parameter["shape"]) for group in parameter_metadata for parameter in group)
         entry = {"artifact_dir": str(checkpoint.resolve()), "global_step": state["global_step"],
@@ -638,12 +711,24 @@ def _run_gradient_attribution(
         ]
         directory = gradient_directory(output_dir, identities)
         entry["gradient_cache"] = str(directory.relative_to(Path(output_dir)))
-        if method == "less":
+        if method == "trackstar":
+            from .trackstar import parameter_blocks
+            parameter_blocks(parameter_metadata)
+            processed_identity = trackstar_identity(identities, _sha256_file(checkpoint / "optimizer.pt"), target_device)
+            checkpoint_key = {"version": "trackstar-lora-adamw-cosine-v1", "features": processed_identity,
+                              "scoring_device": str(target_device), "precision": "float32-ieee"}
+            score_dir = Path(output_dir) / "trackstar" / "checkpoint_scores" / cache_key(checkpoint_key)
+        elif method == "less":
             processed_identity = less_identity(identities, _sha256_file(checkpoint / "optimizer.pt"), target_device)
             checkpoint_key = {"version": "less-cosine-v1", "features": processed_identity,
                               "scoring_device": str(target_device), "precision": "float32-ieee"}
             score_dir = Path(output_dir) / "less" / "checkpoint_scores" / cache_key(checkpoint_key)
             entry["normalized_weight"] = weight / total_weight
+        elif method == "rapid_in":
+            processed_identity = rapid_identity(identities, target_device)
+            checkpoint_key = {"version": "rapidin-signed-dot-v1", "features": processed_identity,
+                              "scoring_device": str(target_device), "precision": "float32-ieee"}
+            score_dir = Path(output_dir) / "rapid_in" / "checkpoint_scores" / cache_key(checkpoint_key)
         else:
             score_dir = score_directory(output_dir, _score_identity(identities, weight, str(target_device)))
         entry["score_cache"] = str(score_dir.relative_to(Path(output_dir)))
@@ -686,7 +771,32 @@ def _run_gradient_attribution(
                 torch.cuda.empty_cache()
         _write_json(directory / "feature_metadata.json", entry)
         _write_json(directory / "features_complete.json", {"feature_version": manifest["feature_version"]})
-        if method == "less":
+        if method == "trackstar":
+            counter = []
+            def count_tokens(kind):
+                if not counter:
+                    tokenizer = AutoTokenizer.from_pretrained(str(checkpoint))
+                    tokenizer.padding_side = state["padding_side"]
+                    counter.append(TDA(None, tokenizer, Params(), device="cpu"))
+                frame, response = (sources, "response") if kind == "source" else (queries, "expected_response")
+                counts = []
+                for _, row in frame.iterrows():
+                    tokens = counter[0].get_tokenized_text(counter[0].tokenizer,
+                        {"prompts": row["prompts"], "response": row[response]}, device="cpu")
+                    counts.append(int((tokens["labels"][:, 1:] != -100).sum()))
+                return counts
+            processed_dir, processed = trackstar_features(
+                output_dir, matrices, processed_identity, checkpoint, parameter_metadata, str(target_device),
+                count_factory=count_tokens,
+            )
+            entry["feature_cache"] = str(processed_dir.relative_to(Path(output_dir)))
+            print("Scoring TrackStar whitened gradient cosine similarities...", flush=True)
+            scores += _checkpoint_scores(
+                score_dir, processed, identities, 1.0, tqdm, device=str(target_device),
+                score_key=checkpoint_key, label=label,
+            )
+            del processed
+        elif method == "less":
             processed_dir, processed = less_features(
                 output_dir, matrices, processed_identity, checkpoint, parameter_metadata, str(target_device),
             )
@@ -695,6 +805,17 @@ def _run_gradient_attribution(
             scores += entry["normalized_weight"] * _checkpoint_scores(
                 score_dir, processed, identities, 1.0, tqdm, device=str(target_device),
                 score_key=checkpoint_key, label="LESS",
+            )
+            del processed
+        elif method == "rapid_in":
+            processed_dir, processed = rapid_features(
+                output_dir, matrices, processed_identity, parameter_metadata, str(target_device),
+            )
+            entry["feature_cache"] = str(processed_dir.relative_to(Path(output_dir)))
+            print("Scoring RapidIn compressed gradient dot products...", flush=True)
+            scores += _checkpoint_scores(
+                score_dir, processed, identities, 1.0, tqdm, device=str(target_device),
+                score_key=checkpoint_key, label=label,
             )
             del processed
         else:
@@ -753,7 +874,6 @@ def _save_features(method_dir, source_features, query_features, sources, queries
         with pending.open("wb") as stream:
             np.savez_compressed(stream, features=matrix, row_indices=frame.index.to_numpy(dtype=np.int64))
         pending.replace(feature_path)
-        # JSON preserves labels without requiring pickle when loading features.
         rows = frame[["label"]].copy()
         rows.insert(0, "row_index", frame.index)
         _write_json(method_dir / f"{name}_rows.json", json.loads(rows.to_json(orient="records")))

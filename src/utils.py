@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Dict
+
 from datasets import Dataset
 from transformers import TokenizersBackend
 
@@ -23,12 +24,15 @@ class Result:
             f"MRR={self.MRR:.4f})"
         )
 
+
 @dataclass
 class Params:
-    """Parameters for TDA in TDAEvaluation for each of use across self.traces evaluations for all methods."""
+    """Options for direct feature extraction through TDAEvaluation."""
+
     layer_norm: bool = True
     layer: int = -1
-    optimizer_state: Dict = None # load optimizer.pt then query for ['state']
+    optimizer_state: Dict = None  # Per-parameter optimizer state, without parameter groups.
+
 
 def tokenize(sample: Dict, tokenizer: TokenizersBackend, max_length=512):
     if tokenizer.chat_template:

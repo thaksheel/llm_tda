@@ -1,12 +1,11 @@
-import torch
-import torch.nn.functional as F
+from typing import Dict, Literal
+
 import numpy as np
-import random
-from typing import Dict, List, Optional, Literal
+import torch
 from datasets import Dataset
-from transformers import TokenizersBackend
-from peft import PeftModel
 from numpy.typing import NDArray
+from peft import PeftModel
+from transformers import TokenizersBackend
 
 from .utils import Params
 from modules import BasicProjector, ProjectionType
@@ -48,58 +47,21 @@ class TDA:
         else:
             raise NotImplementedError
 
-    def _get_divisors(self, n):
-        divs = []
-        for i in range(1, int(n**0.5) + 1):
-            if n % i == 0:
-                divs.append(i)
-        return divs
-
-    def random_suffle(self, vector: torch.Tensor, num_shuffles=20):
-        vec_len = vector.shape[0]
-        shuffled_v = vector.clone()
-        divs = self._get_divisors(vec_len)
-        # random shuffle
-        for _ in range(num_shuffles):
-            x_row = random.choice(divs)
-            mat = shuffled_v.reshape(x_row, vec_len // x_row)
-            row_indices = torch.randperm(mat.shape[0], device=vector.device)
-            shuffled_v = mat[row_indices, :]
-            x_col = random.choice(divs)
-            mat = shuffled_v.reshape(vec_len // x_col, x_col)
-            col_indices = torch.randperm(mat.shape[1], device=vector.device)
-            shuffled_v = mat[:, col_indices]
-        return shuffled_v.flatten()
-
     def rapid_in(self, prompt: str, expected_response: str):
-        self.model.eval()
-        self.model.zero_grad()
-        inputs = self.get_tokenized_text(
-            self.tokenizer,
-            {"prompts": prompt, "response": expected_response},
-            device=self.model.device,
-        )
-        outputs = self.model(**inputs)
-        loss: torch.Tensor = outputs["loss"]
-        loss.backward()
-        gradient_vector = torch.cat(
-            [
-                p.grad.view(-1)
-                for n, p in self.model.named_parameters()
-                if p.grad is not None
-            ]
-        )
-        # gradient_vector = gradient_vector.reshape(
-        #     self.model.config.num_hidden_layers
-        # )
-        gradient_vector = F.layer_norm(
-            gradient_vector, normalized_shape=[gradient_vector.shape[-1]]
-        )
-        gradient_vector = self.random_suffle(gradient_vector)
-        gradient_vector = self.random_projection(
-            gradient_vector, proj_dim=2**16, block_size=1024
-        )
-        return gradient_vector.cpu().numpy()
+        """Use the same sample-level compression as the pipeline runner."""
+        from .rapid_in import COMPRESSION, RapidProjector
+
+        parameters = [(name, parameter) for name, parameter in self.model.named_parameters()
+                      if parameter.requires_grad]
+        names = [name for name, _ in parameters]
+        gradient = self.get_gradient_vector(prompt, expected_response, names)
+        mapping = [[{"name": name, "shape": list(parameter.shape)} for name, parameter in parameters]]
+        signature = (tuple(names), tuple(tuple(parameter.shape) for _, parameter in parameters),
+                     str(gradient.device), tuple(sorted(COMPRESSION.items())))
+        if getattr(self, "_rapid_signature", None) != signature:
+            self._rapid_projector = RapidProjector(len(gradient), mapping, COMPRESSION, gradient.device)
+            self._rapid_signature = signature
+        return self._rapid_projector.project(gradient.unsqueeze(0))[0].cpu().numpy()
 
     def prepare_optimizer_state(self, optimizer_state):
         names = [_ for _ in range(len(optimizer_state))]
@@ -220,7 +182,6 @@ class TDA:
         self.model.eval()
         self.model.zero_grad()
         self.model.config.use_cache = False
-        # model.set_requires_grad(requires_grad=True)
         captured_grads = []
         if not (1 <= layer <= self.model.config.num_hidden_layers or layer == -1):
             raise ValueError(
@@ -239,10 +200,8 @@ class TDA:
         loss.backward()
         self.model.zero_grad(set_to_none=True)
         torch.cuda.empty_cache()
-        # [0, 0, ..., 0, 0, r_response_1, ..., r_response_n, 0]
         cg: torch.Tensor = captured_grads[0][0][prompt_len - 1 : -1].to(torch.float32)
-        # Preserve [response tokens, hidden dimensions] so RepT's [0] selects
-        # the first token's entire gradient rather than a single coordinate.
+        # Keep the token axis so RepT selects the full first-response gradient.
         return cg.cpu().numpy()
 
     def rept(

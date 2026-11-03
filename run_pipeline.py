@@ -1,8 +1,9 @@
-import os
 import gc
 import math
-from pathlib import Path
+import os
 from argparse import ArgumentParser
+from pathlib import Path
+
 from src.run_tda import run_attribution
 from src.run_ft import (
     get_lora_config, get_training_args, get_tuner, train_tuner,
@@ -11,38 +12,32 @@ from src.run_ft import (
     find_epoch_artifacts,
 )
 
+
 def main():
     print("Starting TDA pipeline; reading command-line arguments...", flush=True)
-    # Keep RUN_PIPELINE.md updated when arguments, defaults, or behavior change.
-    parser = ArgumentParser(description="Command line flags for TDA pipeline.")
+    parser = ArgumentParser(description="Fine-tuning and training data attribution pipeline.")
 
-
-    #============================#
-    # lora_config(src/run_ft.py) #
-    #============================#
+    # LoRA options
     parser.add_argument("--r",
                         type=int,
                         help="LoRA adapter rank; higher values add trainable parameters and use more memory",
                         default=8)
-    
+
     parser.add_argument("--alpha",
                         type=int,
                         help="LoRA scaling factor; adapter updates are scaled by alpha / r",
                         default=16)
-    
+
     parser.add_argument("--dropout",
                         type=float,
                         help="Dropout probability for LoRA layers, from 0 to less than 1",
                         default=0.1)
 
-
-    #============================#
-    #training_args(src/run_ft.py)#
-    #============================#
+    # Training options
     parser.add_argument("output_dir",
                         type=str,
-                        help="Directory for Trainer checkpoints and training outputs (required positional argument)")
-    
+                        help="Directory for training checkpoints and attribution outputs")
+
     parser.add_argument("--batch",
                         type=int,
                         help="Training examples processed per device in each forward/backward pass",
@@ -68,29 +63,23 @@ def main():
                         help="Maximum gradient norm for clipping; 0 disables gradient clipping",
                         default=1)
 
-
-    #============================#
-    #    tuner(src/run_ft.py)    #
-    #============================#
+    # Model and data
     parser.add_argument("dataset",
                         type=str,
-                        help="Path to formatted dataset for TDA")
+                        help="Path to a prepared Hugging Face dataset saved with save_to_disk()")
 
     parser.add_argument("model",
                         type=str,
-                        help="Model for TDA")
+                        help="Hugging Face base-model identifier or local model directory")
 
-
-    #============================#
-    #       Pipeline / TDA       #
-    #============================#
+    # Attribution options
     parser.add_argument("--stage",
                         choices=["all", "train", "tda"],
                         help="Run both stages, training only, or attribution only with verified existing artifacts",
                         default="train")
 
     parser.add_argument("--method",
-                        choices=["rept", "tracin", "less"],
+                        choices=["rept", "tracin", "less", "rapid_in", "lorif", "trak", "logra", "trackstar"],
                         help="Attribution method to run after training or artifact reuse",
                         default="rept")
 
@@ -119,10 +108,7 @@ def main():
                         help="Total evaluation query limit, balanced across labels when possible",
                         default=None)
 
-
-    #============================#
-    #       Cache controls       #
-    #============================#
+    # Training reuse and resume
     parser.add_argument("--force-train",
                         action="store_true",
                         help="Train again even when matching completed artifacts exist; replaces final artifacts",
@@ -133,7 +119,6 @@ def main():
                         help="Resume the latest usable checkpoint in output_dir, skipping partial saves; stop if none is usable",
                         default=False)
 
-    
     args = parser.parse_args()
 
     if args.resume and args.force_train:
@@ -232,7 +217,7 @@ def main():
         print("Creating training arguments and initializing the compute device...", flush=True)
         training_args = get_training_args(**training_inputs)
         print("Loading training pipeline...", flush=True)
-        tuner = get_tuner(args.dataset,args.model,training_args,lora_config)
+        tuner = get_tuner(args.dataset, args.model, training_args, lora_config)
         print("Loading model/tokenizer, preparing data, and starting fine-tuning...", flush=True)
         trainer = train_tuner(tuner, checkpoint_path=checkpoint_path)
         print("Fine-tuning and artifact saving complete.", flush=True)
@@ -248,6 +233,7 @@ def main():
             source_limit=args.sources, query_limit=args.queries,
         )
         print(metrics.to_string(index=False))
+
 
 if __name__ == "__main__":
     main()

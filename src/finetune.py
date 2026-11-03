@@ -3,10 +3,11 @@ import math
 import shutil
 import uuid
 from pathlib import Path
+from typing import Tuple
+
 import torch
 from datasets import load_from_disk, Dataset
-from typing import List, Tuple, Dict, Any, Optional, Literal
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import (
     Trainer,
     TrainingArguments,
@@ -17,7 +18,6 @@ from transformers import (
     TokenizersBackend,
     TrainerCallback,
 )
-from peft import PeftModel
 
 from .utils import get_tokenized_dataset
 from .run_ft import checkpoint_identity
@@ -105,7 +105,6 @@ class EpochArtifactsCallback(TrainerCallback):
         return control
 
     def on_epoch_end(self, args, state, control, **kwargs):
-        # The fourth save is the durable completed-epoch checkpoint.
         control.should_save = True
         return control
 
@@ -182,7 +181,6 @@ class Tuner:
         self.tracin_interval = None
         self.training_ancestors = []
 
-        # null fields
         self.model: PeftModel = None
         self.tokenizer: TokenizersBackend = None
         self.dataset: Dataset = None
@@ -257,7 +255,6 @@ class Tuner:
         return trainer
 
     def save_training_artifacts(self, trainer, save_dir=None):
-        # Preserve the existing adapter location used by src/run_tda.py.
         save_dir = Path(save_dir) if save_dir is not None else Path(
             f"./lora_adapter/{self.model_name}/{self.dataset_name}"
         )
@@ -291,7 +288,6 @@ class Tuner:
 
         trainer.save_model(str(save_dir))
         self.tokenizer.save_pretrained(str(save_dir))
-        # Keep the full state dictionary, including optimizer parameter groups.
         torch.save(optimizer_state, save_dir / "optimizer.pt")
         (save_dir / "optimizer_parameters.json").write_text(
             json.dumps(parameter_groups, indent=2), encoding="utf-8"
@@ -332,4 +328,3 @@ class Tuner:
         )
         pending_path.replace(complete_path)
         return save_dir
-

@@ -1,29 +1,21 @@
-# LLM TDA Methods
+# LLM Training Data Attribution
 
-See [the pipeline guide](RUN_PIPELINE.md) for current controller arguments,
-training examples, and saved artifacts.
-See [method changes](Changes.md) for attribution corrections and numerical choices
-affecting results.
+Fine-tune a causal language model with LoRA, then rank training examples by their
+attribution scores for query responses.
 
-`run_pipeline.py` is the command-line entry point. Training and attribution
-helpers live in `src/`, regression tests in `tests/`, and bundled method code
-in `modules/`. See the pipeline guide for the package layout and commands.
+Supported methods: RepT, TracIn, LESS, RapidIn, LoRIF, TRAK, LoGRA, and TrackStar.
+Evaluation reports auPRC, precision@k, recall@k, and MRR using matching source and
+query labels.
 
-This repository is a work in progress focused on building a pipeline for training data attribution (TDA) in large language model (LLM) settings.
+- [Pipeline guide](RUN_PIPELINE.md): setup, inputs, commands, flags, and saved outputs.
+- [Method changes](Changes.md): mathematical corrections, numerical choices, and
+  adaptations from the papers and reference implementations.
 
-The goal is to implement and evaluate the latest training data analysis (TDA) attributing model behavior back to training data. The project is centered on understanding how examples in the training set affect model outputs, metrics, and downstream performance across attribution and influence analysis. 
+`run_pipeline.py` is the command-line entry point. Supporting code lives in `src/`,
+regression tests in `tests/`, and bundled method libraries in `modules/`.
 
-## Current focus
+Run the regression suite from the repository root with the environment activated:
 
-- Collecting latest TDA methods for LLMs
-- Evaluating performance on influence (tail-patch score, and LDS) and attribution (MRR, P@K, R@K) metrics
-- Integration of latest TDA datasets such as TRex and FTRACE-TRex 
-
-## Repository overview
-
-This codebase contains scripts and modules for:
-
-- fine-tuning and experiment orchestration
-- TDA / influence-based tracing workflows
-- dataset handling and evaluation utilities
-- experimental runs for attribution-focused analysis
+```bash
+python -m unittest discover -s tests
+```

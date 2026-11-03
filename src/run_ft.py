@@ -1,6 +1,6 @@
+import hashlib
 import json
 import math
-import hashlib
 from pathlib import Path
 
 
@@ -25,7 +25,7 @@ def checkpoint_identity(checkpoint):
             "adapter_config_sha256": digest(checkpoint / "adapter_config.json")}
 
 
-def get_lora_options(r,alpha,dropout):
+def get_lora_options(r, alpha, dropout):
     return dict(
         r=r,
         lora_alpha=alpha,
@@ -37,23 +37,25 @@ def get_lora_options(r,alpha,dropout):
             "v_proj",
             "o_proj",
             "gate_proj",
-            "up_proj"
+            "up_proj",
         ],
     )
 
 
-def get_lora_config(r,alpha,dropout):
+def get_lora_config(r, alpha, dropout):
     from peft import LoraConfig
 
     return LoraConfig(**get_lora_options(r, alpha, dropout))
 
 
-def get_training_options(output_dir,
-                      per_device_train_batch_size,
-                      gradient_accumulation_steps,
-                      num_train_epochs,
-                      warmup_steps,
-                      max_grad_norm):
+def get_training_options(
+    output_dir,
+    per_device_train_batch_size,
+    gradient_accumulation_steps,
+    num_train_epochs,
+    warmup_steps,
+    max_grad_norm,
+):
     return dict(
         output_dir=output_dir,
         per_device_train_batch_size=per_device_train_batch_size,
@@ -88,7 +90,7 @@ def get_training_args(**options):
     return TrainingArguments(**get_training_options(**options))
 
 
-def get_tuner(data_set,model,training_args,lora_config):
+def get_tuner(data_set, model, training_args, lora_config):
     from .finetune import Tuner
 
     tuner = Tuner(
