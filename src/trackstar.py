@@ -23,6 +23,55 @@ def feature_identity(gradients, optimizer_sha256, device):
             "optimizer_sha256": optimizer_sha256, "settings": dict(SETTINGS), "device": str(device)}
 
 
+class GradientRows:
+    """Read compatible saved rows or compute a projection batch without raw writes."""
+    def __init__(self, directory, kind, frame, response, identity, extract):
+        import numpy as np
+        from .gradient_cache import directory_in_use
+        self.frame, self.response, self.extract = frame, response, extract
+        self.shape = tuple(identity["shape"])
+        self.saved, self.completed = None, 0
+        directory = Path(directory)
+        if directory.exists() and directory_in_use(directory):
+            raise RuntimeError(f"Shared gradients are in use by another process: {directory}")
+        try:
+            progress = json.loads((directory / f"{kind}_progress.json").read_text(encoding="utf-8"))
+            completed = progress["completed_rows"]
+            if (progress["identity"] != identity or type(completed) is not int
+                    or not 0 <= completed <= len(frame)):
+                raise ValueError("incompatible saved gradient progress")
+            path = directory / f"{kind}_features.npy"
+            saved = np.load(path, mmap_mode="r", allow_pickle=False)
+            if (saved.shape != self.shape or saved.dtype != np.float32
+                    or saved.offset + saved.nbytes != path.stat().st_size):
+                raise ValueError("invalid saved gradient matrix")
+            self.saved, self.completed = saved, completed
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        if self.completed:
+            print(f"TrackStar can reuse raw {kind} gradients: {self.completed}/{len(frame)} rows", flush=True)
+
+    def __len__(self):
+        return self.shape[0]
+
+    def __getitem__(self, selection):
+        import numpy as np
+        start, stop, step = selection.indices(len(self))
+        if step != 1:
+            raise ValueError("TrackStar gradient batches require contiguous rows")
+        values = np.empty((stop - start, self.shape[1]), dtype=np.float32)
+        for offset, row in enumerate(range(start, stop)):
+            if row < self.completed:
+                vector = self.saved[row]
+            else:
+                sample = self.frame.iloc[row]
+                vector = self.extract(sample["prompts"], sample[self.response])
+            if vector.shape != (self.shape[1],) or not np.isfinite(vector).all():
+                raise ValueError("Nonfinite or incorrectly shaped TrackStar gradient")
+            values[offset] = vector
+        return values
+
+
 def parameter_blocks(parameter_groups, maximum=8):
     """Pool consecutive transformer layers; separate attention from MLP matrices."""
     parameters, layers, offset = [], set(), 0
@@ -131,7 +180,7 @@ def _matrix(path, shape, completed, identity, progress_path):
 
 
 def projected_features(output_dir, matrices, identity, checkpoint, parameter_groups, device,
-                       *, count_factory, progress_factory=None):
+                       *, count_factory, progress_factory=None, release_factory=None):
     """Cache projection rows, whitening blocks, and final globally normalized features."""
     import numpy as np
     import torch
@@ -191,6 +240,8 @@ def projected_features(output_dir, matrices, identity, checkpoint, parameter_gro
                     del batch, values
         projected.append(matrix)
     del projector, denominator
+    if release_factory is not None:
+        release_factory()
     progress_path = directory / "whitening_progress.json"
     if any(not (directory / f"{kind}_whitened.npy").is_file() for kind in ("source", "query")):
         progress_path.unlink(missing_ok=True)

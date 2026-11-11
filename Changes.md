@@ -30,8 +30,13 @@ score(source, query) = dot(u_source / norm(u_source), u_query / norm(u_query))
   excluding embeddings and Adafactor states. Frozen base-weight optimizer states
   are unavailable in these checkpoints. No first-moment update, source confidence
   weighting, or checkpoint learning-rate weighting is applied.
-- Restores response-token-sum gradients from the shared response-token-mean cache
-  by multiplying each row by its number of valid, causally shifted labels. Counts
+- Computes missing response-token-mean gradients in memory and immediately
+  projects each batch, saving no new raw-gradient files. Existing compatible raw
+  rows are reused read-only, including completed prefixes of partial caches.
+  Completed projection batches resume without recomputing their gradients, and
+  existing TrackStar feature caches retain the same identity.
+- Restores response-token-sum gradients from either computed or cached mean
+  gradients by multiplying each row by its number of valid, causally shifted labels. Counts
   use the existing tokenizer, prompt masking, and 512-token truncation. This
   algebraic conversion retains the cached gradients' floating-point precision.
 - Pools consecutive transformer layers into up to eight groups, splitting

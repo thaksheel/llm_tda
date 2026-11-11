@@ -116,6 +116,7 @@ class EpochArtifactsCallback(TrainerCallback):
             pending = path.with_suffix(".json.tmp")
             pending.write_text(json.dumps({"global_step": state.global_step,
                 "training_run_id": self.tuner.training_run_id, "interval": self.lr_interval,
+                "source_fingerprint": getattr(self.tuner, "source_fingerprint", None),
                 "training_ancestors": self.ancestors}), encoding="utf-8")
             pending.replace(path)
         epoch = state.epoch
@@ -156,7 +157,6 @@ class EpochArtifactsCallback(TrainerCallback):
         for _, path in expired:
             if path.is_symlink() or path.resolve().parent != root:
                 raise ValueError(f"Refusing to delete checkpoint outside {root}: {path}")
-            print(f"Removing old intermediate checkpoint: {path}", flush=True)
             shutil.rmtree(path)
 
 

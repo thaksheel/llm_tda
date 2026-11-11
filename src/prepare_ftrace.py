@@ -1,4 +1,4 @@
-"""Prepare a supported FTRACE subset for causal masked-entity fine-tuning."""
+"""Prepare FTRACE for causal masked-entity fine-tuning."""
 
 import argparse
 from collections import defaultdict
@@ -199,9 +199,14 @@ def main():
     parser.add_argument("--sources", type=int, help="Prepared source count", default=1000)
     parser.add_argument("--queries", type=int, help="Distinct supported query facts", default=100)
     parser.add_argument("--seed", type=int, help="Deterministic subset seed", default=42)
+    parser.add_argument("--full", action="store_true", help="Convert the whole corpus; select subsets in run_pipeline.py", default=False)
     args = parser.parse_args()
     try:
-        prepare(args.raw, args.output, args.model, args.sources, args.queries, args.seed)
+        if args.full:
+            from .prepare_full import prepare_full
+            prepare_full(args.raw, args.output, "ftrace")
+        else:
+            prepare(args.raw, args.output, args.model, args.sources, args.queries, args.seed)
     except (ValueError, FileExistsError) as error:
         parser.error(str(error))
 

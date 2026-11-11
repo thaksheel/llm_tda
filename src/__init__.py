@@ -7,7 +7,7 @@ _EXPORTS = {
     "Tuner": (".finetune", "Tuner"),
     "TDA": (".tda", "TDA"),
     "TDAEvaluation": (".tda_evaluation", "TDAEvaluation"),
-    "Result": (".utils", "Result"),
+    "Result": (".results", "Result"),
     "Params": (".utils", "Params"),
     "BasicProjector": ("modules", "BasicProjector"),
     "ProjectionType": ("modules", "ProjectionType"),

@@ -16,6 +16,10 @@ def run_attribution(
     source_limit=None, query_limit=None,
 ):
     """Dispatch attribution calls from the pipeline."""
+    if method == "bm25":
+        from .bm25 import run_bm25
+        return run_bm25(source_path, query_path, output_dir=output_dir, topk=topk,
+                        source_limit=source_limit, query_limit=query_limit)
     if method == "logra":
         from .logra import run_logra
         return run_logra(
@@ -42,7 +46,7 @@ def run_attribution(
             device=device, topk=topk, source_limit=source_limit, query_limit=query_limit,
         )
     if method != "rept":
-        raise ValueError("Supported methods are 'rept', 'tracin', 'less', 'rapid_in', 'lorif', 'trak', 'logra', and 'trackstar'")
+        raise ValueError("Supported methods are 'rept', 'tracin', 'less', 'rapid_in', 'lorif', 'trak', 'logra', 'trackstar', and 'bm25'")
     return run_rept(
         artifact_dir, source_path, query_path, output_dir=output_dir, device=device, topk=topk,
         layer=layer, source_limit=source_limit, query_limit=query_limit,
@@ -594,7 +598,7 @@ def _run_gradient_attribution(
     artifact_dir, source_path, query_path, *, output_dir, device, topk,
     source_limit, query_limit, method,
 ):
-    """Share checkpoint validation and raw gradient extraction across methods."""
+    """Share checkpoint validation and gradient-based attribution across methods."""
     import gc
     import numpy as np
     import pandas as pd
@@ -664,7 +668,7 @@ def _run_gradient_attribution(
             parameter_selection="saved trainable LoRA parameters; adaptation from full-model Adafactor",
         )
         # Raw-cache identity retains its actual mean-loss definition.
-        manifest["feature_transform_loss"] = "response-token-sum after multiplying cached gradients by valid token counts"
+        manifest["feature_transform_loss"] = "response-token-sum after multiplying computed or cached gradients by valid token counts"
         if not (Path(artifact_dir) / "optimizer.pt").is_file():
             raise ValueError("TrackStar needs saved optimizer second moments")
     if method == "rapid_in":
@@ -709,8 +713,12 @@ def _run_gradient_attribution(
             _gradient_identity(entry, manifest, sources, "response"),
             _gradient_identity(entry, manifest, queries, "expected_response"),
         ]
-        directory = gradient_directory(output_dir, identities)
-        entry["gradient_cache"] = str(directory.relative_to(Path(output_dir)))
+        if method == "trackstar":
+            directory = Path(output_dir) / "gradients" / cache_key(identities)
+            entry["raw_gradient_storage"] = "read-only reuse when available; missing rows projected without raw saves"
+        else:
+            directory = gradient_directory(output_dir, identities)
+            entry["gradient_cache"] = str(directory.relative_to(Path(output_dir)))
         if method == "trackstar":
             from .trackstar import parameter_blocks
             parameter_blocks(parameter_metadata)
@@ -733,7 +741,10 @@ def _run_gradient_attribution(
             score_dir = score_directory(output_dir, _score_identity(identities, weight, str(target_device)))
         entry["score_cache"] = str(score_dir.relative_to(Path(output_dir)))
         required_bytes = (len(sources) + len(queries)) * entry["dimensions"] * 4
-        print(f"Raw gradient storage: approximately {required_bytes / 2**30:.2f} GiB per checkpoint (existing compatible files are reused)", flush=True)
+        if method == "trackstar":
+            print("TrackStar projects missing gradients directly; no new raw gradient files are saved.", flush=True)
+        else:
+            print(f"Raw gradient storage: approximately {required_bytes / 2**30:.2f} GiB per checkpoint (existing compatible files are reused)", flush=True)
         loaded = []
 
         def extract(prompt, response):
@@ -757,20 +768,28 @@ def _run_gradient_attribution(
                 loaded.extend([TDA(model, tokenizer, Params(layer_norm=False), device=str(target_device)), names])
             return loaded[0].get_gradient_vector(prompt, response, loaded[1]).cpu().numpy()
 
+        def release_model():
+            loaded.clear()
+            gc.collect()
+            if target_device.type == "cuda":
+                torch.cuda.empty_cache()
+
         matrices = []
         try:
             for kind, frame, response, identity in (
                 ("source", sources, "response", identities[0]),
                 ("query", queries, "expected_response", identities[1]),
             ):
-                matrices.append(_gradient_rows(directory, kind, frame, response, identity, extract))
+                if method == "trackstar":
+                    from .trackstar import GradientRows
+                    matrices.append(GradientRows(directory, kind, frame, response, identity, extract))
+                else:
+                    matrices.append(_gradient_rows(directory, kind, frame, response, identity, extract))
         finally:
-            loaded.clear()
-            gc.collect()
-            if target_device.type == "cuda":
-                torch.cuda.empty_cache()
-        _write_json(directory / "feature_metadata.json", entry)
-        _write_json(directory / "features_complete.json", {"feature_version": manifest["feature_version"]})
+            release_model()
+        if method != "trackstar":
+            _write_json(directory / "feature_metadata.json", entry)
+            _write_json(directory / "features_complete.json", {"feature_version": manifest["feature_version"]})
         if method == "trackstar":
             counter = []
             def count_tokens(kind):
@@ -785,10 +804,13 @@ def _run_gradient_attribution(
                         {"prompts": row["prompts"], "response": row[response]}, device="cpu")
                     counts.append(int((tokens["labels"][:, 1:] != -100).sum()))
                 return counts
-            processed_dir, processed = trackstar_features(
-                output_dir, matrices, processed_identity, checkpoint, parameter_metadata, str(target_device),
-                count_factory=count_tokens,
-            )
+            try:
+                processed_dir, processed = trackstar_features(
+                    output_dir, matrices, processed_identity, checkpoint, parameter_metadata, str(target_device),
+                    count_factory=count_tokens, release_factory=release_model,
+                )
+            finally:
+                release_model()
             entry["feature_cache"] = str(processed_dir.relative_to(Path(output_dir)))
             print("Scoring TrackStar whitened gradient cosine similarities...", flush=True)
             scores += _checkpoint_scores(

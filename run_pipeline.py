@@ -1,9 +1,11 @@
 import gc
 import math
 import os
+import sys
 from argparse import ArgumentParser
 from pathlib import Path
 
+from src.data_selection import select_data, check_resume_selection
 from src.run_tda import run_attribution
 from src.run_ft import (
     get_lora_config, get_training_args, get_tuner, train_tuner,
@@ -11,6 +13,9 @@ from src.run_ft import (
     get_resume_checkpoint,
     find_epoch_artifacts,
 )
+
+
+METHODS = ("rept", "tracin", "less", "rapid_in", "lorif", "trak", "logra", "trackstar", "bm25")
 
 
 def main():
@@ -79,9 +84,10 @@ def main():
                         default="train")
 
     parser.add_argument("--method",
-                        choices=["rept", "tracin", "less", "rapid_in", "lorif", "trak", "logra", "trackstar"],
-                        help="Attribution method to run after training or artifact reuse",
-                        default="rept")
+                        nargs="+",
+                        choices=[*METHODS, "all"],
+                        help="One or more attribution methods in execution order, or all by itself",
+                        default=["rept"])
 
     parser.add_argument("--device",
                         help="Attribution device, such as cuda:0 or cpu; training still uses automatic placement",
@@ -100,13 +106,18 @@ def main():
 
     parser.add_argument("--sources",
                         type=int,
-                        help="Total attribution source limit, balanced across labels when possible",
+                        help="Seeded source subset used for both training and attribution; preserves query support",
                         default=None)
 
     parser.add_argument("--queries",
                         type=int,
-                        help="Total evaluation query limit, balanced across labels when possible",
+                        help="Seeded supported query count, balanced across relations or labels",
                         default=None)
+
+    parser.add_argument("--seed",
+                        type=int,
+                        help="Data selection seed; reproduces the subset with the same corpus and tokenizer",
+                        default=42)
 
     # Training reuse and resume
     parser.add_argument("--force-train",
@@ -120,6 +131,10 @@ def main():
                         default=False)
 
     args = parser.parse_args()
+
+    if "all" in args.method and len(args.method) != 1:
+        parser.error("Use --method all by itself, or list the individual methods to run")
+    methods = METHODS if args.method == ["all"] else tuple(dict.fromkeys(args.method))
 
     if args.resume and args.force_train:
         parser.error("--resume and --force-train cannot be used together")
@@ -159,6 +174,31 @@ def main():
             checkpoint_path = get_resume_checkpoint(args.output_dir)
         except ValueError as error:
             parser.error(str(error))
+
+    selected = args.sources is not None or args.queries is not None
+    if selected:
+        print("Selecting training sources and evaluation queries...", flush=True)
+        try:
+            args.dataset, query_path = select_data(
+                args.dataset, query_path, args.output_dir, args.model,
+                sources=args.sources, queries=args.queries, seed=args.seed,
+            )
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+
+    if args.resume and selected:
+        try:
+            check_resume_selection(args.dataset, checkpoint_path)
+        except ValueError as error:
+            parser.error(str(error))
+
+    if methods == ("bm25",) and args.stage in ("all", "tda"):
+        if args.resume or args.force_train:
+            parser.error("BM25 alone does not train; omit --resume and --force-train")
+        metrics = run_attribution(None, args.dataset, query_path, method="bm25",
+                                  output_dir=args.output_dir, topk=args.topk)
+        print(metrics.to_string(index=False))
+        return
 
     lora_options = get_lora_options(
         r=args.r,
@@ -226,14 +266,23 @@ def main():
         gc.collect()
 
     if args.stage in ("all", "tda"):
-        metrics = run_attribution(
-            artifact_dir, args.dataset, query_path, method=args.method,
-            output_dir=args.output_dir,
-            device=args.device, topk=args.topk, layer=args.layer,
-            source_limit=args.sources, query_limit=args.queries,
-        )
-        print(metrics.to_string(index=False))
-
+        for number, method in enumerate(methods, 1):
+            print(f"Running attribution method {number}/{len(methods)}: {method}", flush=True)
+            try:
+                metrics = run_attribution(
+                    artifact_dir, args.dataset, query_path, method=method,
+                    output_dir=args.output_dir,
+                    device=args.device, topk=args.topk, layer=args.layer,
+                    source_limit=None, query_limit=None,
+                )
+                print(metrics.to_string(index=False))
+                del metrics
+            finally:
+                gc.collect()
+                torch = sys.modules.get("torch")
+                if torch is not None and args.device.split(":")[0] == "cuda" and torch.cuda.is_available():
+                    with torch.cuda.device(args.device):
+                        torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     main()

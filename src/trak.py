@@ -217,12 +217,15 @@ def score_features(directory, source, query, kernel, identity, device):
     u, inverse, vh = [torch.from_numpy(np.array(value, copy=True)).to(device) for value in kernel]
     q_source = torch.from_numpy(np.array(source[1], copy=True)).to(device)
     scores = np.empty(shape, dtype=np.float64)
-    for start in range(0, len(query[0]), 128):
-        values = torch.from_numpy(np.array(query[0][start:start + 128], copy=True)).to(device)
-        result = (((values @ vh.T) * inverse) @ u.T) * q_source
-        if not torch.isfinite(result).all():
-            raise ValueError("Nonfinite TRAK scores")
-        scores[start:start + len(values)] = result.double().cpu().numpy()
+    from tqdm import tqdm
+    with tqdm(total=len(query[0]), desc="TRAK scoring", unit="query") as progress:
+        for start in range(0, len(query[0]), 128):
+            values = torch.from_numpy(np.array(query[0][start:start + 128], copy=True)).to(device)
+            result = (((values @ vh.T) * inverse) @ u.T) * q_source
+            if not torch.isfinite(result).all():
+                raise ValueError("Nonfinite TRAK scores")
+            scores[start:start + len(values)] = result.double().cpu().numpy()
+            progress.update(len(values))
     _save(path, scores=scores, identity=json.dumps(identity, sort_keys=True))
     return scores
 

@@ -1,14 +1,16 @@
-from typing import List, Literal
+from __future__ import annotations
+
+from typing import List, Literal, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-import torch
-from peft import PeftModel
 from sklearn.metrics import average_precision_score
 from tqdm import tqdm
 
-from .utils import Result, Params
-from .tda import TDA
+from .results import Result
+
+if TYPE_CHECKING:
+    from .utils import Params
 
 
 class TDAEvaluation:
@@ -20,7 +22,10 @@ class TDAEvaluation:
         params: Params,
         display: bool = False,
     ):
-        self.model: PeftModel = model
+        import torch
+        from .tda import TDA
+
+        self.model = model
         self.device = torch.device(device)
         self.params = params
         self.tokenizer = tokenizer
